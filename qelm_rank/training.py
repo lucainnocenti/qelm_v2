@@ -23,27 +23,14 @@ from .quantum import (
 )
 
 
-RANDOM_POVM_KINDS = {
-    "random",
-    "random_rank1",
-}
-EXPLICIT_POVM_KINDS = {
-    "effects",
-    "explicit",
-    "fixed",
-    "povm",
-    "povm_effects",
-}
-TILDE_U_TEST_STATE_ALIASES = {
-    "haar": "haar",
-    "haar_average": "haar",
-    "haar_pure": "haar",
-    "haar_pure_state_average": "haar",
-    "haar_sample": "haar_sample",
-    "sampled_haar": "haar_sample",
-    "training_mean": "training_mean",
-    "training_subset": "training_subset",
-    "training_column": "training_column",
+RANDOM_POVM_KIND = "random_rank1"
+EXPLICIT_POVM_KIND = "effects"
+TEST_STATE_SELECTORS = {
+    "haar",
+    "haar_sample",
+    "training_mean",
+    "training_subset",
+    "training_column",
 }
 TILDE_U_DEFAULT_HAAR_SAMPLE_POINTS = 64
 TILDE_U_TEST_STATE_ERROR = (
@@ -67,6 +54,13 @@ QELM_HAAR_TRAIN_STATES_COUNT_ERROR = (
     "pass {'kind': 'haar', 'num_states': ntr}."
 )
 _TRAIN_STATES_MISSING = object()
+
+
+def _reject_alias_keys(mapping: dict, aliases: set[str], *, context: str) -> None:
+    used_aliases = aliases.intersection(mapping)
+    if used_aliases:
+        names = ", ".join(sorted(used_aliases))
+        raise ValueError(f"{context} uses unsupported alias key(s): {names}.")
 
 
 @dataclass(frozen=True)
@@ -687,48 +681,53 @@ def _required_noise_N(noise: QELMNoiseSpec) -> int:
 
 def _povm_kind_from_spec(povm) -> str:
     if povm is None:
-        return "random_rank1"
+        return RANDOM_POVM_KIND
 
     if isinstance(povm, str):
         kind = povm.lower()
-        if kind not in RANDOM_POVM_KINDS:
+        if kind != RANDOM_POVM_KIND:
             raise ValueError("Only 'random_rank1' is supported as a string POVM spec.")
-        return "random_rank1"
+        return RANDOM_POVM_KIND
 
     if isinstance(povm, dict):
+        _reject_alias_keys(
+            povm,
+            {"type", "povm_effects", "num_outcomes", "d"},
+            context="POVM spec",
+        )
         if "effects" in povm:
-            return "effects"
+            return EXPLICIT_POVM_KIND
 
-        kind = str(povm.get("kind", povm.get("type", "random_rank1"))).lower()
-        if kind in RANDOM_POVM_KINDS:
-            return "random_rank1"
-        if kind in EXPLICIT_POVM_KINDS:
-            return "effects"
+        kind = str(povm.get("kind", RANDOM_POVM_KIND)).lower()
+        if kind == RANDOM_POVM_KIND:
+            return RANDOM_POVM_KIND
+        if kind == EXPLICIT_POVM_KIND:
+            return EXPLICIT_POVM_KIND
         raise ValueError(f"Unknown POVM spec kind: {kind!r}.")
 
     if isinstance(povm, POVMEffects):
-        return "effects"
+        return EXPLICIT_POVM_KIND
 
-    return "effects"
+    return EXPLICIT_POVM_KIND
 
 
 def _povm_shape_from_spec(povm) -> tuple[int | None, int | None]:
     kind = _povm_kind_from_spec(povm)
 
-    if kind == "effects":
+    if kind == EXPLICIT_POVM_KIND:
         if isinstance(povm, POVMEffects):
             return povm.nout, povm.dim
         effects = povm
         if isinstance(povm, dict):
-            effects = povm.get("effects", povm.get("povm_effects"))
+            effects = povm.get("effects")
             if effects is None:
                 raise ValueError("Explicit POVM dictionary specs must include 'effects'.")
         povm_effects = POVMEffects.from_effects(effects)
         return povm_effects.nout, povm_effects.dim
 
     if isinstance(povm, dict):
-        nout = povm.get("nout", povm.get("num_outcomes"))
-        dim = povm.get("dim", povm.get("d"))
+        nout = povm.get("nout")
+        dim = povm.get("dim")
         return (
             None if nout is None else int(nout),
             None if dim is None else int(dim),
@@ -746,8 +745,13 @@ def _validate_random_povm_spec_for_config(
     if not isinstance(povm, dict):
         return
 
-    spec_nout = povm.get("nout", povm.get("num_outcomes"))
-    spec_dim = povm.get("dim", povm.get("d"))
+    _reject_alias_keys(
+        povm,
+        {"type", "povm_effects", "num_outcomes", "d"},
+        context="POVM spec",
+    )
+    spec_nout = povm.get("nout")
+    spec_dim = povm.get("dim")
     if spec_nout is not None and int(spec_nout) != int(nout):
         raise ValueError(
             f"Random POVM spec has nout={spec_nout}, but the config has nout={nout}."
@@ -760,7 +764,7 @@ def _validate_random_povm_spec_for_config(
 
 def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> POVMEffects:
     kind = _povm_kind_from_spec(povm)
-    if kind == "random_rank1":
+    if kind == RANDOM_POVM_KIND:
         _validate_random_povm_spec_for_config(povm, nout=nout, dim=dim)
         return POVMEffects.random_rank1(nout=nout, dim=dim, rng=rng)
 
@@ -773,7 +777,7 @@ def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> P
 
     effects = povm
     if isinstance(povm, dict):
-        effects = povm.get("effects", povm.get("povm_effects"))
+        effects = povm.get("effects")
     return POVMEffects.from_effects(effects, dim=dim, nout=nout)
 
 
@@ -829,11 +833,21 @@ def _training_states_from_spec(
             raise ValueError(QELM_TRAIN_STATES_ERROR)
 
     if isinstance(train_states, dict):
-        kind = str(train_states.get("kind", train_states.get("mode", "states"))).lower()
-        if kind in {"haar", "haar_pure", "haar_random"}:
+        _reject_alias_keys(
+            train_states,
+            {"mode", "d", "state_vectors", "density_matrices", "rhos"},
+            context="train_states spec",
+        )
+        if "kind" in train_states:
+            kind = str(train_states["kind"]).lower()
+        elif "vectors" in train_states:
+            kind = "state_vectors"
+        else:
+            kind = "states"
+        if kind == "haar":
             if "num_states" not in train_states:
                 raise ValueError(QELM_HAAR_TRAIN_STATES_COUNT_ERROR)
-            requested_dim = int(train_states.get("dim", train_states.get("d", dim)))
+            requested_dim = int(train_states.get("dim", dim))
             if requested_dim != int(dim):
                 raise ValueError(
                     f"Haar training states request d={requested_dim}, but the config has d={dim}."
@@ -845,8 +859,10 @@ def _training_states_from_spec(
             )
             return _validate_training_state_batch(batch, dim=dim)
 
-        vectors = train_states.get("vectors", train_states.get("state_vectors"))
-        if vectors is not None:
+        if kind == "state_vectors":
+            vectors = train_states.get("vectors")
+            if vectors is None:
+                raise ValueError(QELM_TRAIN_STATES_ERROR)
             batch = QuantumStateBatch.from_state_vectors(
                 vectors,
                 dim=int(dim),
@@ -855,10 +871,9 @@ def _training_states_from_spec(
             )
             return _validate_training_state_batch(batch, dim=dim)
 
-        states = train_states.get(
-            "states",
-            train_states.get("density_matrices", train_states.get("rhos")),
-        )
+        if kind != "states":
+            raise ValueError(QELM_TRAIN_STATES_ERROR)
+        states = train_states.get("states")
         if states is None:
             raise ValueError(QELM_TRAIN_STATES_ERROR)
         batch = QuantumStateBatch.from_state_like(states, dim=int(dim), name="train_states")
@@ -874,18 +889,24 @@ def _training_state_count_from_spec(train_states) -> int | None:
     if isinstance(train_states, QuantumStateBatch):
         return int(train_states.num_states)
     if isinstance(train_states, dict):
-        if "num_states" in train_states:
-            return int(train_states["num_states"])
-        vectors = train_states.get("vectors", train_states.get("state_vectors"))
-        if vectors is not None:
-            return None
-        states = train_states.get(
-            "states",
-            train_states.get("density_matrices", train_states.get("rhos")),
+        _reject_alias_keys(
+            train_states,
+            {"mode", "d", "state_vectors", "density_matrices", "rhos"},
+            context="train_states spec",
         )
-        if states is not None:
+        if "kind" in train_states:
+            kind = str(train_states["kind"]).lower()
+        elif "vectors" in train_states:
+            kind = "state_vectors"
+        else:
+            kind = "states"
+        if kind == "haar":
+            if "num_states" in train_states:
+                return int(train_states["num_states"])
             return None
-        return None
+        if kind in {"state_vectors", "states"}:
+            return None
+        raise ValueError(QELM_TRAIN_STATES_ERROR)
     return None
 
 
@@ -896,18 +917,19 @@ def _with_training_num_states(train_states, num_states: int):
     if count <= 0:
         raise ValueError("ntr sweep values must be positive.")
     if isinstance(train_states, str):
-        if train_states.lower() not in {"haar", "haar_pure", "haar_random"}:
+        if train_states.lower() != "haar":
             raise ValueError("ntr sweeps can only update Haar train_states specs.")
         train_states = {"kind": train_states.lower()}
     if not isinstance(train_states, dict):
         raise ValueError("ntr sweeps require a Haar train_states spec.")
+    _reject_alias_keys(
+        train_states,
+        {"mode", "d", "state_vectors", "density_matrices", "rhos"},
+        context="train_states spec",
+    )
     updated = dict(train_states)
     updated["num_states"] = count
-    if str(updated.get("kind", updated.get("mode", "states"))).lower() not in {
-        "haar",
-        "haar_pure",
-        "haar_random",
-    }:
+    if str(updated.get("kind", "states")).lower() != "haar":
         raise ValueError("ntr sweeps can only update Haar train_states specs.")
     return updated
 
@@ -925,9 +947,9 @@ def _test_state_selector_from_string(value: str) -> str:
     key = value.lower()
     if key == "fixed_state":
         raise ValueError("test_state='fixed_state' is ambiguous; pass the state vector or density matrix instead.")
-    if key not in TILDE_U_TEST_STATE_ALIASES:
+    if key not in TEST_STATE_SELECTORS:
         raise ValueError(TILDE_U_TEST_STATE_ERROR)
-    return TILDE_U_TEST_STATE_ALIASES[key]
+    return key
 
 
 def _default_test_state_point_count(selector: str) -> int | None:
@@ -961,8 +983,13 @@ def _resolve_test_state_request(
         )
 
     if isinstance(test_state, dict):
-        kind = test_state.get("kind", test_state.get("mode", test_state.get("type")))
-        state = test_state.get("state", test_state.get("value"))
+        _reject_alias_keys(
+            test_state,
+            {"mode", "type", "value", "points", "count", "sample_size"},
+            context="test_state spec",
+        )
+        kind = test_state.get("kind")
+        state = test_state.get("state")
         if kind is None:
             if state is None:
                 raise ValueError(TILDE_U_TEST_STATE_ERROR)
@@ -972,10 +999,7 @@ def _resolve_test_state_request(
                 raise ValueError("test_state fixed-state dictionaries require a 'state' value.")
             return "fixed_state", state, None
         selector = _test_state_selector_from_string(str(kind))
-        count = test_state.get(
-            "num_points",
-            test_state.get("points", test_state.get("count", test_state.get("sample_size"))),
-        )
+        count = test_state.get("num_points")
         return selector, None, _test_state_point_count(
             count,
             default=_default_test_state_point_count(selector),
@@ -1257,7 +1281,7 @@ def resolve_qelm_target(
 
     if isinstance(target_observable, str):
         key = target_observable.lower()
-        if key in {"haar_pure", "haar_pure_state", "haar_pure_state_average", "haar_average"}:
+        if key == "haar_pure_state_average":
             _, target_second = haar_moments_from_operator_rows(
                 context.povm_dual_effect_rows,
                 dim=dim,
@@ -1269,7 +1293,7 @@ def resolve_qelm_target(
                 P=P,
                 target_normalization=target_normalization,
             )
-        if key in {"random_haar_pure", "random_haar_pure_state"}:
+        if key == "random_haar_pure_state":
             vector = generate_haar_random_state_vector_columns(
                 num_states=1,
                 dim=dim,
@@ -1909,6 +1933,7 @@ def _run_qelm_training_resolved(
         raise ValueError("Resolved test must provide either second_moment or probabilities.")
 
     if target.is_average:
+        # in this branch we compute the average over target observables
         # this is to compute the exact haar average training error by simulating the training process with noise
         target_second_moment = np.asarray(target.second_moment, dtype=float)
         test_second_moment = _test_second_moment(test)

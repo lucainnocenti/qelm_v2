@@ -157,7 +157,7 @@ def test_run_tilde_u_training_approx_experiment_accepts_povm_dictionary_effects(
 
 def test_run_tilde_u_training_approx_experiment_accepts_random_povm_spec():
     raw, summary = _run_tilde_u(
-        povm={"kind": "random", "nout": 8, "dim": 2},
+        povm={"kind": "random_rank1", "nout": 8, "dim": 2},
         ntr=16,
         repetitions=1,
         actual_noise_trials=1,

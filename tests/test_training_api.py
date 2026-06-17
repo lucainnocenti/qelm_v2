@@ -111,13 +111,18 @@ def test_flexible_haar_training_states_require_sweep_count():
         make_qelm_training_context(spec, rng=np.random.default_rng(123))
 
 
-def test_random_povm_spec_builds_valid_context():
+def test_training_state_alias_is_rejected():
+    spec = _small_spec(train_states={"kind": "haar_pure", "num_states": 12})
+
+    with np.testing.assert_raises_regex(ValueError, "train_states is required"):
+        make_qelm_training_context(spec, rng=np.random.default_rng(123))
+
+
+def test_random_povm_alias_is_rejected():
     spec = _small_spec(povm={"kind": "random", "nout": 8, "dim": 2})
 
-    context = make_qelm_training_context(spec, rng=np.random.default_rng(123))
-
-    assert context.P_train.shape == (8, 12)
-    np.testing.assert_allclose(context.P_train.sum(axis=0), 1.0, atol=1e-10)
+    with np.testing.assert_raises_regex(ValueError, "Unknown POVM spec kind"):
+        make_qelm_training_context(spec, rng=np.random.default_rng(123))
 
 
 def test_random_rank1_string_povm_spec_builds_valid_context():
@@ -136,6 +141,29 @@ def test_random_rank1_dict_povm_spec_builds_valid_context():
 
     assert context.P_train.shape == (8, 12)
     np.testing.assert_allclose(context.P_train.sum(axis=0), 1.0, atol=1e-10)
+
+
+def test_test_state_alias_is_rejected():
+    spec = _small_spec(target=np.array([[1.0, 0.0], [0.0, 0.0]]))
+    spec = QELMTrainingSpec(
+        data=spec.data,
+        target=spec.target,
+        noise=spec.noise,
+        test=QELMTestRequest(state="haar_average"),
+        numerics=spec.numerics,
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "test_state must be"):
+        make_qelm_training_context(spec, rng=np.random.default_rng(123))
+
+
+def test_target_alias_is_rejected():
+    spec = _small_spec(target="haar_average")
+    context = make_qelm_training_context(spec, rng=np.random.default_rng(123))
+    diagnostics = compute_qelm_diagnostics(spec, context)
+
+    with np.testing.assert_raises_regex(ValueError, "Unknown target_observable string"):
+        resolve_qelm_target(spec, context, diagnostics, rng=np.random.default_rng(456))
 
 
 def test_actual_training_returns_weight_shapes_and_optional_fits():
