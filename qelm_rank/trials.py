@@ -7,6 +7,7 @@ import pandas as pd
 from .blocks import PBlocks
 from .linalg import empirical_quantiles, opnorm, safe_inv
 from .noise import generate_gaussian_Xi, generate_multinomial_Xi, project_noise_blocks
+from .quantum import get_rng
 
 
 def theoretical_predictors(blocks: PBlocks) -> Dict[str, float]:
@@ -61,7 +62,7 @@ def theoretical_predictors(blocks: PBlocks) -> Dict[str, float]:
 
 def one_trial_diagnostics(
     blocks: PBlocks,
-    rng: np.random.Generator,
+    rng: np.random.Generator | int | None = None,
     N: int = 1000,
     noise_model: str = "multinomial",
     inv_rcond: float = 1e-12,
@@ -73,6 +74,7 @@ def one_trial_diagnostics(
         "multinomial" = exact finite-N multinomial normalized by sqrt(N)
         "gaussian" = large-N Gaussian approximation
     """
+    rng = get_rng(rng)
     P = blocks.P
     p_dim = blocks.p_dim
 
@@ -146,14 +148,14 @@ def run_trials(
     trials: int = 100,
     N: int = 1000,
     noise_model: str = "multinomial",
-    seed: int = 12345,
+    seed: int | None = None,
     inv_rcond: float = 1e-12,
     progress: bool = True,
 ) -> pd.DataFrame:
     """
     Run many trials for a fixed P.
     """
-    rng = np.random.default_rng(seed)
+    rng = get_rng(seed)
     rows = []
 
     for k in range(trials):

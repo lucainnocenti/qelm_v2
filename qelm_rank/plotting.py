@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .linalg import loglog_slope
+from .linalg import loglog_slope, quantile_suffix
 
 
 def scatter_loglog(
@@ -28,7 +28,7 @@ def scatter_loglog(
     else:
         for label, g in df.groupby(label_col):
             ax.scatter(g[x_col], g[y_col], alpha=0.8, label=f"{label_col}={label}")
-        ax.legend()
+        ax.legend(loc="lower left")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -50,6 +50,320 @@ def scatter_loglog(
 
     ax.grid(True, which="both", alpha=0.3)
     plt.show()
+
+
+def plot_median_iqr(
+    ax,
+    df: pd.DataFrame,
+    x_col: str,
+    base_col: str,
+    label: str,
+) -> None:
+    """
+    Plot median with q25-q75 shading from summarized trial columns.
+    """
+    x = df[x_col].to_numpy(dtype=float)
+    y_q25 = df[f"{base_col}_q25"].to_numpy(dtype=float)
+    y_med = df[f"{base_col}_median"].to_numpy(dtype=float)
+    y_q75 = df[f"{base_col}_q75"].to_numpy(dtype=float)
+
+    line = ax.plot(x, y_med, marker="o", label=f"median {label}")[0]
+    ax.fill_between(
+        x,
+        y_q25,
+        y_q75,
+        color=line.get_color(),
+        alpha=0.18,
+        linewidth=0,
+        label=f"q25-q75 {label}",
+    )
+
+
+def plot_summary_series(
+    summary_df: pd.DataFrame,
+    *,
+    x_col: str = "p_kernel",
+    plots,
+    thresholds: Optional[Dict[str, float]] = None,
+    figsize: Tuple[float, float] = (7, 4.5),
+    logx: bool = True,
+    logy: bool = True,
+) -> None:
+    """
+    Plot summarized series from a DataFrame using declarative plot specs.
+
+    Each plot spec is a dict with title, ylabel, and series. A series entry is
+    either "metric_base" or ("metric_base", "label"). If metric_base_q25,
+    metric_base_median, and metric_base_q75 exist, the median and IQR are
+    plotted. Otherwise metric_base itself is plotted directly.
+    """
+    thresholds = thresholds or {}
+
+    for spec in plots:
+        fig, ax = plt.subplots(figsize=figsize)
+        plotted_y_cols = []
+
+        for series in spec["series"]:
+            if isinstance(series, str):
+                base_col = label = series
+            else:
+                base_col, label = series
+
+            if f"{base_col}_median" in summary_df.columns:
+                plot_median_iqr(ax, summary_df, x_col, base_col, label)
+                plotted_y_cols.append(f"{base_col}_median")
+            else:
+                ax.plot(
+                    summary_df[x_col],
+                    summary_df[base_col],
+                    marker="o",
+                    label=label,
+                )
+                plotted_y_cols.append(base_col)
+
+        threshold_key = spec.get("threshold")
+        if threshold_key:
+            ax.axhline(
+                thresholds[threshold_key],
+                color="black",
+                linestyle="--",
+                linewidth=1,
+                label="threshold",
+            )
+
+        if logx:
+            ax.set_xscale("log")
+        if logy:
+            ax.set_yscale("log")
+        ax.set_xlabel("p_kernel = ntr - r" if x_col == "p_kernel" else x_col)
+        ax.set_ylabel(spec["ylabel"])
+
+        title = spec["title"]
+        if spec.get("annotate_slope") and len(plotted_y_cols) == 1:
+            slope, _ = loglog_slope(summary_df, x_col, plotted_y_cols[0])
+            if np.isfinite(slope):
+                title += f"    fitted slope: {slope:.3f}"
+
+        ax.set_title(title)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+        plt.show()
+
+
+def plot_mean_median_quantile_summary(
+    summary_df: pd.DataFrame,
+    *,
+    x_col: str,
+    metrics,
+    quantile_band: Tuple[float, float] = (0.25, 0.75),
+    label_col: Optional[str] = None,
+    figsize: Tuple[float, float] = (7, 4.5),
+    logx: bool = True,
+    logy: bool = True,
+    show_mean: bool = True,
+    show_median: bool = True,
+    annotate_slope: bool = True,
+) -> None:
+    """
+    Plot summarized metrics with mean, median, and a configurable quantile band.
+
+    metrics entries can be:
+        "metric_base"
+        ("metric_base", "title and ylabel")
+        ("metric_base", "title", "ylabel")
+
+    The summary is expected to contain columns like metric_base_mean,
+    metric_base_median, metric_base_q25, metric_base_q75.
+    """
+    q_low, q_high = quantile_band
+    low_suffix = quantile_suffix(q_low)
+    high_suffix = quantile_suffix(q_high)
+
+    groups = [(None, summary_df)]
+    if label_col is not None and label_col in summary_df.columns:
+        groups = list(summary_df.groupby(label_col, dropna=False))
+
+    for metric in metrics:
+        if isinstance(metric, str):
+            base_col = ylabel = title = metric
+        else:
+            if len(metric) == 2:
+                base_col, ylabel = metric
+                title = ylabel
+            elif len(metric) == 3:
+                base_col, title, ylabel = metric
+            else:
+                raise ValueError(
+                    "Metric specs must be strings, (metric, label), or "
+                    "(metric, title, ylabel)."
+                )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        slope_col = None
+
+        for label, group in groups:
+            group = group.sort_values(x_col)
+            prefix = "" if label is None else f"{label_col}={label}, "
+            x = group[x_col].to_numpy(dtype=float)
+
+            qlo_col = f"{base_col}_{low_suffix}"
+            qhi_col = f"{base_col}_{high_suffix}"
+            if qlo_col in group.columns and qhi_col in group.columns:
+                y_lo = group[qlo_col].to_numpy(dtype=float)
+                y_hi = group[qhi_col].to_numpy(dtype=float)
+                band = ax.fill_between(
+                    x,
+                    y_lo,
+                    y_hi,
+                    alpha=0.14,
+                    linewidth=0,
+                    label=f"{prefix}{low_suffix}-{high_suffix} across realizations",
+                )
+                band_color = band.get_facecolor()[0]
+            else:
+                band_color = None
+
+            if show_median and f"{base_col}_median" in group.columns:
+                line = ax.plot(
+                    x,
+                    group[f"{base_col}_median"],
+                    marker="o",
+                    label=f"{prefix}median across realizations",
+                )[0]
+                slope_col = f"{base_col}_median"
+                if band_color is not None:
+                    line.set_color(band_color)
+
+            if show_mean and f"{base_col}_mean" in group.columns:
+                ax.plot(
+                    x,
+                    group[f"{base_col}_mean"],
+                    marker="s",
+                    linestyle="--",
+                    label=f"{prefix}mean across realizations",
+                )
+
+        if logx:
+            ax.set_xscale("log")
+        if logy:
+            ax.set_yscale("log")
+
+        plot_title = title
+        if annotate_slope and slope_col is not None and label_col is None:
+            slope, _ = loglog_slope(summary_df, x_col, slope_col)
+            if np.isfinite(slope):
+                plot_title += f"    fitted median slope: {slope:.3f}"
+
+        ax.set_title(plot_title)
+        x_labels = {
+            "p_kernel": "training null-space dimension p = n_tr - d^2",
+            "q": "output complement dimension q = n_out - d^2",
+            "N": "training shots per state N",
+            "ntr": "number of training states n_tr",
+            "nout": "number of POVM outcomes n_out",
+        }
+        ax.set_xlabel(x_labels.get(x_col, x_col))
+        ax.set_ylabel(ylabel)
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+        plt.show()
+
+def plot_grouped_mean_median_quantile_summary(
+    summary_df,
+    *,
+    x_col,
+    plots,
+    quantile_band=(0.25, 0.75),
+    logx=True,
+    logy=True,
+    figsize=(5.5, 4.0),
+    show_mean=True,
+    show_band=True,
+):
+    """
+    Plot several summarized quantities on the same axes.
+
+    Each entry of plots is:
+        (
+            [(base_col, label), ...],
+            title,
+            ylabel,
+        )
+
+    For each base_col, summary_df should contain:
+        base_col_median
+        base_col_mean
+        base_col_q25, base_col_q75, etc.
+
+    Color distinguishes the physical/model quantity.
+    Line style distinguishes statistic:
+        solid  = median
+        dashed = mean
+    """
+    qlo, qhi = quantile_band
+    qlo_suffix = f"q{int(round(100 * qlo))}"
+    qhi_suffix = f"q{int(round(100 * qhi))}"
+
+    x = summary_df[x_col].to_numpy(dtype=float)
+
+    for series_specs, title, ylabel in plots:
+        fig, ax = plt.subplots(figsize=figsize)
+
+        for base, label in series_specs:
+            median_col = f"{base}_median"
+            mean_col = f"{base}_mean"
+            qlo_col = f"{base}_{qlo_suffix}"
+            qhi_col = f"{base}_{qhi_suffix}"
+
+            if median_col not in summary_df.columns:
+                raise ValueError(f"Missing column {median_col}")
+
+            y_med = summary_df[median_col].to_numpy(dtype=float)
+
+            median_line, = ax.plot(
+                x,
+                y_med,
+                marker="o",
+                linestyle="-",
+                label=f"{label}, median",
+            )
+            color = median_line.get_color()
+
+            if show_mean and mean_col in summary_df.columns:
+                y_mean = summary_df[mean_col].to_numpy(dtype=float)
+                ax.plot(
+                    x,
+                    y_mean,
+                    marker="x",
+                    linestyle="--",
+                    color=color,
+                    label=f"{label}, mean",
+                )
+
+            if show_band and qlo_col in summary_df.columns and qhi_col in summary_df.columns:
+                y_lo = summary_df[qlo_col].to_numpy(dtype=float)
+                y_hi = summary_df[qhi_col].to_numpy(dtype=float)
+                ax.fill_between(
+                    x,
+                    y_lo,
+                    y_hi,
+                    color=color,
+                    alpha=0.15,
+                )
+
+        ax.set_title(title)
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(ylabel)
+
+        if logx:
+            ax.set_xscale("log")
+        if logy:
+            ax.set_yscale("log")
+
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend(framealpha=0.4)
+        fig.tight_layout()
+        plt.show()
 
 def plot_metric_vs_predictors(summary: pd.DataFrame, quantile: str = "p90") -> None:
     """

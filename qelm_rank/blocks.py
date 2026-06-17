@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .linalg import opnorm, safe_inv, validate_probability_matrix
+from .linalg import opnorm, safe_inv, symmetrize, validate_probability_matrix
 
 
 @dataclass
@@ -45,6 +45,96 @@ class PBlocks:
     q_pbar_inf: float
     q_pbar_uniform_inf: float
 
+def svd_probability_blocks(
+    P: np.ndarray,
+    rank: int,
+    tol: float = 1e-10,
+) -> dict:
+    """
+    Build the SVD block basis used by the Schur-correction scaling diagnostic.
+
+    Returns U1, U2, V1, V2, singular values, diagonal entries of
+    Pi2 = I - V1 V1^T, and dimension metadata. The returned key names match
+    the original notebook diagnostics for stable downstream DataFrame columns.
+    """
+    P = np.asarray(P, dtype=float)
+    nout, ntr = P.shape
+    r = int(rank)
+
+    if r <= 0:
+        raise ValueError(f"Need positive rank. Got r={r}.")
+    if nout <= r:
+        raise ValueError(f"Need nout > r. Got nout={nout}, r={r}.")
+    if ntr <= r:
+        raise ValueError(f"Need ntr > r. Got ntr={ntr}, r={r}.")
+
+    U, s, Vt = np.linalg.svd(P, full_matrices=True)
+
+    U1 = U[:, :r]
+    U2 = U[:, r:]
+    V1 = Vt.T[:, :r]
+    V2 = Vt.T[:, r:]
+
+    pi2_diag = 1.0 - np.sum(V1 * V1, axis=1)
+    pi2_diag = np.clip(pi2_diag, 0.0, 1.0)
+
+    numerical_rank = int(np.sum(s > tol * s[0])) if s.size and s[0] > 0 else 0
+
+    return {
+        "U1": U1,
+        "U2": U2,
+        "V1": V1,
+        "V2": V2,
+        "singular_values": s,
+        "numerical_rank": numerical_rank,
+        "Pi2_diag": pi2_diag,
+        "r": r,
+        "q": nout - r,
+        "p_kernel": ntr - r,
+    }
+
+
+def schur_covariance_blocks(
+    P: np.ndarray,
+    U1: np.ndarray,
+    U2: np.ndarray,
+    pi2_diag: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute C12 and C22 without explicitly forming every Sigma_i.
+
+    C_ab = (1/p_kernel) sum_i (Pi2)_{ii} U_a^T Sigma_i U_b, where
+    Sigma_i = diag(p_i) - p_i p_i^T.
+    """
+    P = np.asarray(P, dtype=float)
+    pi2_diag = np.asarray(pi2_diag, dtype=float)
+    if pi2_diag.shape != (P.shape[1],):
+        raise ValueError(
+            f"pi2_diag must have shape ({P.shape[1]},). Got {pi2_diag.shape}."
+        )
+
+    p_kernel = np.sum(pi2_diag)
+    if p_kernel <= 0:
+        raise ValueError("The V2 projector diagonal must have positive trace.")
+    w = pi2_diag / p_kernel
+    sqrtw = np.sqrt(w)
+
+    mean_probs = P @ w
+
+    C12_diag = (U1.T * mean_probs[None, :]) @ U2
+    C22_diag = (U2.T * mean_probs[None, :]) @ U2
+
+    Y1 = U1.T @ P
+    Y2 = U2.T @ P
+
+    C12_outer = (Y1 * sqrtw[None, :]) @ (Y2 * sqrtw[None, :]).T
+    C22_outer = (Y2 * sqrtw[None, :]) @ (Y2 * sqrtw[None, :]).T
+
+    C12 = C12_diag - C12_outer
+    C22 = symmetrize(C22_diag - C22_outer)
+    return C12, C22
+
+
 def deterministic_blocks_from_P(
     P: np.ndarray,
     r: int,
@@ -65,57 +155,33 @@ def deterministic_blocks_from_P(
         validate_probability_matrix(P)
 
     nout, ntr = P.shape
-    p_dim = ntr - r
-    q_dim = nout - r
+    svd_blocks = svd_probability_blocks(P, rank=r)
+    p_dim = svd_blocks["p_kernel"]
+    q_dim = svd_blocks["q"]
 
-    if p_dim <= 0:
-        raise ValueError("Need ntr > r, so p_dim=ntr-r must be positive.")
-    if q_dim <= 0:
-        raise ValueError("Need nout > r, so q_dim=nout-r must be positive.")
+    U1 = svd_blocks["U1"]
+    U2 = svd_blocks["U2"]
+    V1 = svd_blocks["V1"]
+    V2 = svd_blocks["V2"]
+    s = svd_blocks["singular_values"]
 
-    U, s, Vt = np.linalg.svd(P, full_matrices=True)
-
-    U1 = U[:, :r]
-    U2 = U[:, r:]
-    V1 = Vt.T[:, :r]
-    V2 = Vt.T[:, r:]
-
-    # Diagonal of Pi2 = V2 V2^T. Equivalent to 1 - rownorm(V1)^2,
-    # but computing from V2 is explicit.
-    # here w_i = (Pi2)_{ii} = (V2 V2^T)_{ii} = sum_j V2_{ij}^2.
-    w = np.sum(V2**2, axis=1)
-    # here pbar_i = (P Pi2)_{ii} = sum_j P_{ij} w_j.
+    # w_i = (Pi2)_{ii} = (V2 V2^T)_{ii}. Its trace is p_dim=ntr-r.
+    w = svd_blocks["Pi2_diag"]
     pbar = P @ w / p_dim
 
-    # Dbar times a matrix X is pbar[:, None] * X.
-    Dbar_U1 = pbar[:, None] * U1
-    Dbar_U2 = pbar[:, None] * U2
+    C12, C22 = schur_covariance_blocks(P, U1, U2, w)
 
-    C22 = U2.T @ Dbar_U2
-    C12 = U1.T @ Dbar_U2
+    A = U1.T @ P
+    C11_diag = U1.T @ (pbar[:, None] * U1)
+    C11_outer = (A * w[None, :]) @ A.T / p_dim
+    C11 = symmetrize(C11_diag - C11_outer)
 
-    # C11 = (1/p) sum_i w_i U1^T Sigma_i U1.
-    # Sigma_i = diag(p_i)-p_i p_i^T.
-    #
-    # First term:
-    # (1/p) sum_i w_i U1^T diag(p_i) U1
-    # = U1^T diag(pbar) U1.
-    #
-    # Second term:
-    # (1/p) sum_i w_i (U1^T p_i)(U1^T p_i)^T.
-    A = U1.T @ P  # shape (r, ntr)
-    second = (A * w[None, :]) @ A.T / p_dim
-    C11 = U1.T @ Dbar_U1 - second
-
-    C22_inv, C22_used_pinv, lam_min_numerical = safe_inv(C22, rcond=inv_rcond)
+    C22_inv, C22_used_pinv, _ = safe_inv(C22, rcond=inv_rcond)
 
     trace_C22 = np.trace(C22)
     evals_C22 = np.linalg.eigvalsh((C22 + C22.T) / 2)
     lambda_min_C22 = float(evals_C22[0])
     lambda_max_C22 = float(evals_C22[-1])
-    # print the rank of C22 for debugging; should be q_dim.
-    rank_C22 = np.sum(np.linalg.eigvalsh(C22) > inv_rcond * np.max(np.abs(np.linalg.eigvalsh(C22))))
-    print('rank_C22:', rank_C22, 'q_dim:', q_dim, 'lam_max:', lambda_max_C22, 'bound:', rank_C22 * lambda_max_C22, 'trace:', trace_C22)
     cond_C22 = float(lambda_max_C22 / lambda_min_C22) if lambda_min_C22 > 0 else np.inf
 
     c_p = opnorm(C12)

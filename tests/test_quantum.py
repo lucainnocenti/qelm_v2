@@ -2,11 +2,19 @@ import numpy as np
 import pytest
 
 from qelm_rank import (
+    POVMEffects,
+    QELMQuantumDataset,
+    QuantumStateBatch,
+    clear_default_rng,
     generate_haar_random_isometry,
     generate_haar_random_pure_states,
     generate_haar_random_state_vectors,
     generate_random_rank1_povm,
+    haar_probability_moments_from_isometry,
     probability_matrix_from_povm_states,
+    probability_vector_from_povm_state,
+    sample_finite_shot_probability_matrix,
+    set_default_rng,
     validate_probability_matrix,
 )
 
@@ -41,6 +49,60 @@ def test_projective_measurement_probability_matrix():
     assert P.shape == (2, 4)
     np.testing.assert_allclose(P, expected, atol=1e-12)
     validate_probability_matrix(P)
+
+
+def test_probability_vector_from_povm_state_accepts_vector_and_density_matrix():
+    zero = density([1, 0])
+    one = density([0, 1])
+    plus = ket([1, 1])
+
+    povm = np.stack([zero, one])
+
+    from_vector = probability_vector_from_povm_state(povm, plus)
+    from_density = probability_vector_from_povm_state(povm, density(plus))
+
+    np.testing.assert_allclose(from_vector, np.array([0.5, 0.5]), atol=1e-12)
+    np.testing.assert_allclose(from_density, from_vector, atol=1e-12)
+
+
+def test_povm_effects_probability_vector_matches_probability_matrix_column():
+    rng = np.random.default_rng(123)
+    povm = POVMEffects.random_isometry(nout=5, dim=2, rng=rng)
+    state = density([1.0, 1.0j])
+
+    p = povm.probability_vector(state)
+    P = povm.probability_matrix(QuantumStateBatch.from_state_like(state, dim=2))
+
+    np.testing.assert_allclose(p, P[:, 0], atol=1e-12)
+    np.testing.assert_allclose(np.sum(p), 1.0, atol=1e-12)
+
+
+def test_sample_finite_shot_probability_matrix_matches_manual_multinomial_columns():
+    P = np.array(
+        [
+            [0.2, 0.1, 0.4],
+            [0.3, 0.6, 0.4],
+            [0.5, 0.3, 0.2],
+        ]
+    )
+    N = 20
+
+    sampled = sample_finite_shot_probability_matrix(
+        P,
+        N=N,
+        rng=np.random.default_rng(123),
+    )
+    manual_rng = np.random.default_rng(123)
+    expected = np.column_stack(
+        [
+            manual_rng.multinomial(N, P[:, i]) / N
+            for i in range(P.shape[1])
+        ]
+    )
+
+    np.testing.assert_allclose(sampled, expected, atol=0.0)
+    np.testing.assert_allclose(sampled.sum(axis=0), 1.0, atol=1e-12)
+    assert np.all((N * sampled).round() == N * sampled)
 
 
 def test_four_outcome_qubit_povm_probability_matrix():
@@ -115,6 +177,23 @@ def test_generate_haar_random_state_vectors_are_normalized():
     assert np.iscomplexobj(vectors)
 
 
+def test_default_rng_reproducibly_feeds_calls_without_explicit_rng():
+    try:
+        set_default_rng(123)
+        first = generate_haar_random_state_vectors(num_states=3, dim=2)
+        second = generate_haar_random_state_vectors(num_states=3, dim=2)
+
+        set_default_rng(123)
+        first_again = generate_haar_random_state_vectors(num_states=3, dim=2)
+        second_again = generate_haar_random_state_vectors(num_states=3, dim=2)
+    finally:
+        clear_default_rng()
+
+    np.testing.assert_allclose(first, first_again, atol=1e-12)
+    np.testing.assert_allclose(second, second_again, atol=1e-12)
+    assert not np.allclose(first, second)
+
+
 def test_generate_haar_random_pure_states_are_density_matrices():
     rng = np.random.default_rng(123)
 
@@ -154,6 +233,24 @@ def test_generate_random_rank1_povm_is_complete_and_rank_one():
         assert np.min(evals) >= -1e-12
 
 
+def test_haar_probability_moments_for_projective_qubit_measurement():
+    isometry = np.eye(2, dtype=complex)
+
+    mean, second = haar_probability_moments_from_isometry(isometry)
+
+    np.testing.assert_allclose(mean, np.array([0.5, 0.5]), atol=1e-12)
+    np.testing.assert_allclose(
+        second,
+        np.array(
+            [
+                [1.0 / 3.0, 1.0 / 6.0],
+                [1.0 / 6.0, 1.0 / 3.0],
+            ]
+        ),
+        atol=1e-12,
+    )
+
+
 def test_random_rank1_povm_and_haar_states_make_probability_matrix():
     rng = np.random.default_rng(123)
     effects = generate_random_rank1_povm(nout=5, dim=2, rng=rng)
@@ -163,6 +260,64 @@ def test_random_rank1_povm_and_haar_states_make_probability_matrix():
 
     assert P.shape == (5, 11)
     validate_probability_matrix(P, atol=1e-10)
+
+
+def test_povm_effects_reject_invalid_completion():
+    zero = density([1, 0])
+    one = density([0, 1])
+
+    with pytest.raises(ValueError, match="sum to identity"):
+        POVMEffects.from_effects(np.stack([zero, 0.5 * one]))
+
+
+def test_povm_effects_and_state_batch_make_probability_matrix():
+    rng = np.random.default_rng(123)
+
+    povm = POVMEffects.random_rank1(nout=5, dim=2, rng=rng)
+    states = QuantumStateBatch.haar_pure(num_states=11, dim=2, rng=rng)
+    P = povm.probability_matrix(states)
+
+    assert povm.nout == 5
+    assert povm.dim == 2
+    assert povm.effect_rows.shape == (5, 4)
+    assert states.state_rows.shape == (11, 4)
+    validate_probability_matrix(P, atol=1e-10)
+
+
+def test_povm_effects_haar_moments_match_isometry_formula():
+    rng = np.random.default_rng(123)
+
+    povm = POVMEffects.random_isometry(nout=6, dim=3, rng=rng)
+    mean, second = povm.haar_probability_moments()
+    expected_mean, expected_second = haar_probability_moments_from_isometry(povm.isometry)
+
+    np.testing.assert_allclose(mean, expected_mean, atol=1e-12)
+    np.testing.assert_allclose(second, expected_second, atol=1e-12)
+
+
+def test_qelm_quantum_dataset_training_dual_rows_match_composed_frame_formula():
+    rng = np.random.default_rng(123)
+    dataset = QELMQuantumDataset.random_isometry(
+        nout=6,
+        ntr=8,
+        ntest=3,
+        dim=2,
+        rng=rng,
+        rcond=1e-12,
+    )
+
+    frame = dataset.train_state_rows.T @ dataset.train_state_rows.conj()
+    frame_pinv = np.linalg.pinv(frame, rcond=1e-12)
+    effect_frame = dataset.effect_rows.T @ dataset.effect_rows.conj()
+    povm_dual_rows = (np.linalg.pinv(effect_frame, rcond=1e-12) @ dataset.effect_rows.T).T
+    expected = (frame_pinv @ povm_dual_rows.T).T
+
+    np.testing.assert_allclose(dataset.training_dual_effect_rows, expected, atol=1e-12)
+    np.testing.assert_allclose(dataset.povm_dual_effect_rows, povm_dual_rows, atol=1e-12)
+    assert dataset.P_train.shape == (6, 8)
+    assert dataset.P_test.shape == (6, 3)
+    assert dataset.dual_P_train.shape == (6, 8)
+    assert dataset.dual_P_test.shape == (6, 3)
 
 
 def test_random_isometry_rejects_too_few_outputs():
