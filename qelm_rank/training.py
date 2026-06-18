@@ -1,32 +1,45 @@
-"""Reusable QELM training specs, contexts, and result objects."""
+"""Structured QELM training API and actual training simulations.
+
+This module owns the user-facing QELM objects: declarative specs, resolved
+training/test/target arrays, deterministic leading-error formulas, and Monte
+Carlo estimates of the actual noisy least-squares fit.  It builds exact
+training probability matrices from POVMs and states, then samples noisy design
+matrices ``P_hat`` through :func:`qelm_rank.noise.noisy_probability_matrix`.
+
+The lower-level ``qelm_rank.trials`` module studies projected scaled noise
+``Xi = sqrt(N) * (P_hat - P)`` for a fixed matrix and block decomposition.  It
+is a proof-diagnostic layer, not the high-level training API.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from os import PathLike
 from typing import ClassVar, Sequence
 
 import numpy as np
 
 from .blocks import schur_covariance_blocks, svd_probability_blocks
 from .linalg import opnorm, psd_solve
-from .noise import shot_noise_matrix
+from .noise import noisy_probability_matrix
 from .quantum import (
     POVMEffects,
     QELMQuantumDataset,
     QuantumStateBatch,
-    generate_haar_random_state_vector_columns,
+    _operator_row_inner_products,
+    generate_haar_random_kets,
     get_rng,
     haar_moments_from_operator_rows,
-    probability_matrix_from_operator_rows,
-    sample_finite_shot_probability_matrix,
 )
 
 
 RANDOM_POVM_KIND = "random_rank1"
 EXPLICIT_POVM_KIND = "effects"
+HAAR_PURE_TRAIN_STATES_KIND = "haar_pure"
+HAAR_PURE_AVERAGE_SELECTOR = "haar_pure_average"
 TEST_STATE_SELECTORS = {
-    "haar",
+    HAAR_PURE_AVERAGE_SELECTOR,
     "haar_sample",
     "training_mean",
     "training_subset",
@@ -34,7 +47,7 @@ TEST_STATE_SELECTORS = {
 }
 TILDE_U_DEFAULT_HAAR_SAMPLE_POINTS = 64
 TILDE_U_TEST_STATE_ERROR = (
-    "test_state must be None, one of 'haar', 'haar_sample', "
+    "test_state must be None, one of 'haar_pure_average', 'haar_sample', "
     "'training_mean', 'training_subset', or 'training_column', "
     "a tuple like ('haar_sample', num_points), a dictionary like "
     "{'kind': 'training_subset', 'num_points': num_points}, "
@@ -42,16 +55,16 @@ TILDE_U_TEST_STATE_ERROR = (
 )
 
 QELM_TRAIN_STATES_ERROR = (
-    "train_states is required. Pass 'haar' in an ntr sweep, "
-    "{'kind': 'haar', 'num_states': ntr} "
+    "train_states is required. Pass 'haar_pure' in an ntr sweep, "
+    "{'kind': 'haar_pure', 'num_states': ntr} "
     "to sample Haar-random pure training states, a QuantumStateBatch, "
     "a density-matrix batch with shape (ntr, d, d), or a dictionary such "
     "as {'kind': 'state_vectors', 'vectors': psi, 'axis': 'columns'}."
 )
 QELM_HAAR_TRAIN_STATES_COUNT_ERROR = (
-    "Haar training-state specs require 'num_states'. Use 'haar' only in an "
-    "ntr sweep study, use {'kind': 'haar'} only in an ntr sweep study, or "
-    "pass {'kind': 'haar', 'num_states': ntr}."
+    "Haar pure training-state specs require 'num_states'. Use 'haar_pure' only in an "
+    "ntr sweep study, use {'kind': 'haar_pure'} only in an ntr sweep study, or "
+    "pass {'kind': 'haar_pure', 'num_states': ntr}."
 )
 _TRAIN_STATES_MISSING = object()
 
@@ -61,6 +74,24 @@ def _reject_alias_keys(mapping: dict, aliases: set[str], *, context: str) -> Non
     if used_aliases:
         names = ", ".join(sorted(used_aliases))
         raise ValueError(f"{context} uses unsupported alias key(s): {names}.")
+
+
+def _infer_explicit_povm_nout(povm: object) -> int | None:
+    if isinstance(povm, POVMEffects):
+        return povm.nout
+    if povm is None or isinstance(povm, str):
+        return None
+
+    effects = povm
+    if isinstance(povm, dict):
+        if "effects" not in povm:
+            return None
+        effects = povm["effects"]
+
+    shape = np.asarray(effects).shape
+    if len(shape) == 0:
+        return None
+    return int(shape[0])
 
 
 @dataclass(frozen=True)
@@ -73,13 +104,21 @@ class QELMDataSpec:
     building `QELMTrainingContext`.
     """
     d: int
-    nout: int
+    nout: int | None = None
     povm: object = None
     train_states: object = field(default=_TRAIN_STATES_MISSING, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.train_states is _TRAIN_STATES_MISSING:
             raise TypeError(QELM_TRAIN_STATES_ERROR)
+        if self.nout is not None:
+            object.__setattr__(self, "nout", int(self.nout))
+            return
+
+        inferred_nout = _infer_explicit_povm_nout(self.povm)
+        if inferred_nout is None:
+            raise ValueError("nout is required unless povm is an explicit POVM.")
+        object.__setattr__(self, "nout", inferred_nout)
 
 
 @dataclass(frozen=True)
@@ -147,61 +186,121 @@ class QELMTrainingSpec:
 
 @dataclass(frozen=True)
 class QELMTrainingContext:
-    """Container for precomputed arrays used during QELM training and testing.
+    """Resolved quantum objects plus lazy pairwise arrays for QELM training.
 
-    This is the concrete matrix layer produced from `QELMDataSpec`. It stores
-    the training probability matrix, dual-frame probability matrix, effect
-    rows, POVM dual rows, exact Haar test moments, and optional sampled test
-    probability matrices. Resolvers and error formulas consume this object
-    instead of reinterpreting the user-level spec.
+    Object-intrinsic representations such as POVM effect rows and state rows
+    live on their owning quantum objects. This context owns only quantities
+    that combine those objects, such as training/test probability matrices.
     """
-    # Training design matrix in the primal representation.
-    P_train: np.ndarray
-    # Training design matrix expressed in the dual representation.
-    dual_P_train: np.ndarray
-    # Dual-space rows associated with the measurement effects.
-    dual_effect_rows: np.ndarray
-    # First moment of the test targets/observables.
-    test_mean: np.ndarray
-    # Second moment of the test targets/observables.
-    test_second: np.ndarray
-    # Dual-space version of the test first moment.
-    dual_test_mean: np.ndarray
-    # Dual-space version of the test second moment.
-    dual_test_second: np.ndarray
-    # Rows associated with the measurement effects in the primal space.
-    effect_rows: np.ndarray
-    # POVM dual effect rows used by the reconstruction/training pipeline.
-    povm_dual_effect_rows: np.ndarray
-    # Optional test design matrix in the primal representation.
-    P_test: np.ndarray | None = None
-    # Optional test design matrix in the dual representation.
-    dual_P_test: np.ndarray | None = None
-    # Raw POVM effects with shape (nout, d, d).
-    povm_effects: np.ndarray | None = None
-    # Raw training density operators with shape (ntr, d, d).
-    train_states: np.ndarray | None = None
-    # Optional raw sampled test density operators with shape (ntest, d, d).
-    test_states: np.ndarray | None = None
+    povm: POVMEffects
+    train_states: QuantumStateBatch
+    test_states: QuantumStateBatch | None = None
+    rcond: float | None = None
+    _P_train_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _dual_effect_rows_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _dual_P_train_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _test_second_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _dual_test_second_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _P_test_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _dual_P_test_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.povm, POVMEffects):
+            raise TypeError("povm must be a POVMEffects object.")
+        if not isinstance(self.train_states, QuantumStateBatch):
+            raise TypeError("train_states must be a QuantumStateBatch.")
+        if self.train_states.dim != self.povm.dim:
+            raise ValueError(
+                f"Training states have dimension d={self.train_states.dim}, "
+                f"but the POVM has dimension d={self.povm.dim}."
+            )
+        if self.test_states is not None:
+            if not isinstance(self.test_states, QuantumStateBatch):
+                raise TypeError("test_states must be a QuantumStateBatch.")
+            if self.test_states.dim != self.povm.dim:
+                raise ValueError(
+                    f"Test states have dimension d={self.test_states.dim}, "
+                    f"but the POVM has dimension d={self.povm.dim}."
+                )
 
     @classmethod
     def from_context(cls, context) -> "QELMTrainingContext":
         return cls(
-            P_train=context.P_train,
-            dual_P_train=context.dual_P_train,
-            dual_effect_rows=context.dual_effect_rows,
-            test_mean=context.test_mean,
-            test_second=context.test_second,
-            dual_test_mean=context.dual_test_mean,
-            dual_test_second=context.dual_test_second,
-            effect_rows=context.effect_rows,
-            povm_dual_effect_rows=context.povm_dual_effect_rows,
-            P_test=context.P_test,
-            dual_P_test=context.dual_P_test,
-            povm_effects=getattr(context, "povm_effects", None),
-            train_states=getattr(context, "train_states", None),
-            test_states=getattr(context, "test_states", None),
+            povm=context.povm,
+            train_states=context.train_states,
+            test_states=context.test_states,
+            rcond=getattr(context, "rcond", None),
         )
+
+    @property
+    def povm_dual_effect_rows(self) -> np.ndarray:
+        return self.povm.dual_effect_rows(self.rcond)
+
+    @property
+    def P_train(self) -> np.ndarray:
+        if self._P_train_cache is None:
+            P = self.povm.probability_matrix(self.train_states)
+            P /= P.sum(axis=0, keepdims=True)
+            object.__setattr__(self, "_P_train_cache", P)
+        return self._P_train_cache
+
+    @property
+    def dual_effect_rows(self) -> np.ndarray:
+        if self._dual_effect_rows_cache is None:
+            rows = (self.train_states._frame_pinv(self.rcond) @ self.povm_dual_effect_rows.T).T
+            object.__setattr__(self, "_dual_effect_rows_cache", rows)
+        return self._dual_effect_rows_cache
+
+    @property
+    def dual_P_train(self) -> np.ndarray:
+        if self._dual_P_train_cache is None:
+            P = _operator_row_inner_products(
+                self.dual_effect_rows,
+                self.train_states._state_rows,
+                clip=False,
+            )
+            object.__setattr__(self, "_dual_P_train_cache", P)
+        return self._dual_P_train_cache
+
+    @property
+    def test_second(self) -> np.ndarray:
+        if self._test_second_cache is None:
+            _, second = self.povm.haar_probability_moments()
+            object.__setattr__(self, "_test_second_cache", second)
+        return self._test_second_cache
+
+    @property
+    def dual_test_second(self) -> np.ndarray:
+        if self._dual_test_second_cache is None:
+            _, second = haar_moments_from_operator_rows(
+                self.dual_effect_rows,
+                dim=self.povm.dim,
+            )
+            object.__setattr__(self, "_dual_test_second_cache", second)
+        return self._dual_test_second_cache
+
+    @property
+    def P_test(self) -> np.ndarray | None:
+        if self.test_states is None:
+            return None
+        if self._P_test_cache is None:
+            P = self.povm.probability_matrix(self.test_states)
+            P /= P.sum(axis=0, keepdims=True)
+            object.__setattr__(self, "_P_test_cache", P)
+        return self._P_test_cache
+
+    @property
+    def dual_P_test(self) -> np.ndarray | None:
+        if self.test_states is None:
+            return None
+        if self._dual_P_test_cache is None:
+            P = _operator_row_inner_products(
+                self.dual_effect_rows,
+                self.test_states._state_rows,
+                clip=False,
+            )
+            object.__setattr__(self, "_dual_P_test_cache", P)
+        return self._dual_P_test_cache
 
     def __getitem__(self, key: str):
         if not hasattr(self, key):
@@ -259,9 +358,11 @@ class ResolvedTest:
 class ResolvedTarget:
     """Array-level target object used by training and leading-error formulas.
 
-    Fixed targets are stored as outcome weights. Averaged targets are stored as
-    a second-moment matrix over outcome weights. This separates target parsing
-    and normalization from the numerical routines that consume the target.
+    Fixed targets keep the representation supplied by the caller: explicit
+    outcome weights remain weights, while operator/state targets remain
+    Hilbert-space operators. Averaged targets are stored as a second-moment
+    matrix over outcome weights because those formulas are explicitly
+    weight-space formulas.
     """
     mode: str
     kind: str
@@ -282,7 +383,7 @@ class ResolvedTarget:
         kind: str,
         normalization: str,
         scale: float,
-        weights: np.ndarray,
+        weights: np.ndarray | None = None,
         operator: np.ndarray | None = None,
         raw_operator: np.ndarray | None = None,
     ) -> "ResolvedTarget":
@@ -322,8 +423,12 @@ class ResolvedTarget:
         if self.is_average:
             if self.second_moment is None or self.weights is not None:
                 raise ValueError("Averaged ResolvedTarget requires second_moment and no weights.")
-        elif self.weights is None or self.second_moment is not None:
-            raise ValueError("Fixed ResolvedTarget requires weights and no second_moment.")
+            if self.operator is not None or self.raw_operator is not None:
+                raise ValueError("Averaged ResolvedTarget cannot carry a fixed operator.")
+        elif self.second_moment is not None:
+            raise ValueError("Fixed ResolvedTarget cannot carry second_moment.")
+        elif self.weights is None and self.operator is None:
+            raise ValueError("Fixed ResolvedTarget requires weights or an operator.")
 
     @classmethod
     def from_target(cls, target) -> "ResolvedTarget":
@@ -523,6 +628,12 @@ class TildeUTrainingApproxStudySpec:
     generate concrete specs, for example by injecting `num_states` into a
     flexible Haar training-state request for an `ntr` sweep. The remaining
     fields control repetitions, summaries, slopes, plotting, and failure mode.
+    `plots` accepts "all" or short keys such as "mse", "leading_mse",
+    "correction", "bias", "variance", "mse_ratio", "actual_ratio", and
+    "relative_error". If `output_file` is set, `run_tilde_u_training_approx_report`
+    writes a compact .zip report containing a raw Parquet table and JSON metadata.
+    Existing report files are not overwritten unless `overwrite=True`; by
+    default, the report writer appends a numeric suffix to the output filename.
     """
     base: QELMTrainingSpec
     sweep_col: str = "ntr"
@@ -542,8 +653,11 @@ class TildeUTrainingApproxStudySpec:
     show_summary: bool = True
     show_slopes: bool = True
     make_plots: bool = True
+    plots: Sequence[str] | str | None = ("all",)
     verbose: bool = True
     fail_soft: bool = False
+    output_file: str | PathLike[str] | None = None
+    overwrite: bool = False
 
 
 @dataclass
@@ -600,8 +714,7 @@ class QELMRun:
             self._target = resolve_qelm_target(
                 self.spec,
                 self.context,
-                self.diagnostics,
-                self.rng,
+                rng=self.rng,
             )
         return self._target
 
@@ -782,23 +895,11 @@ def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> P
 
 
 def _context_from_dataset(dataset: QELMQuantumDataset) -> QELMTrainingContext:
-    test_mean, test_second = dataset.haar_test_moments()
-    dual_test_mean, dual_test_second = dataset.dual_haar_test_moments()
     return QELMTrainingContext(
-        P_train=dataset.P_train,
-        dual_P_train=dataset.dual_P_train,
-        dual_effect_rows=dataset.training_dual_effect_rows,
-        test_mean=test_mean,
-        test_second=test_second,
-        dual_test_mean=dual_test_mean,
-        dual_test_second=dual_test_second,
-        effect_rows=dataset.effect_rows,
-        povm_dual_effect_rows=dataset.povm_dual_effect_rows,
-        P_test=dataset.P_test,
-        dual_P_test=dataset.dual_P_test,
-        povm_effects=dataset.povm.effects,
-        train_states=dataset.train_states.states,
-        test_states=None if dataset.test_states is None else dataset.test_states.states,
+        povm=dataset.povm,
+        train_states=dataset.train_states,
+        test_states=dataset.test_states,
+        rcond=dataset.rcond,
     )
 
 
@@ -827,8 +928,8 @@ def _training_states_from_spec(
         return _validate_training_state_batch(train_states, dim=dim)
 
     if isinstance(train_states, str):
-        if train_states.lower() == "haar":
-            train_states = {"kind": "haar"}
+        if train_states.lower() == HAAR_PURE_TRAIN_STATES_KIND:
+            train_states = {"kind": HAAR_PURE_TRAIN_STATES_KIND}
         else:
             raise ValueError(QELM_TRAIN_STATES_ERROR)
 
@@ -844,7 +945,7 @@ def _training_states_from_spec(
             kind = "state_vectors"
         else:
             kind = "states"
-        if kind == "haar":
+        if kind == HAAR_PURE_TRAIN_STATES_KIND:
             if "num_states" not in train_states:
                 raise ValueError(QELM_HAAR_TRAIN_STATES_COUNT_ERROR)
             requested_dim = int(train_states.get("dim", dim))
@@ -900,7 +1001,7 @@ def _training_state_count_from_spec(train_states) -> int | None:
             kind = "state_vectors"
         else:
             kind = "states"
-        if kind == "haar":
+        if kind == HAAR_PURE_TRAIN_STATES_KIND:
             if "num_states" in train_states:
                 return int(train_states["num_states"])
             return None
@@ -917,7 +1018,7 @@ def _with_training_num_states(train_states, num_states: int):
     if count <= 0:
         raise ValueError("ntr sweep values must be positive.")
     if isinstance(train_states, str):
-        if train_states.lower() != "haar":
+        if train_states.lower() != HAAR_PURE_TRAIN_STATES_KIND:
             raise ValueError("ntr sweeps can only update Haar train_states specs.")
         train_states = {"kind": train_states.lower()}
     if not isinstance(train_states, dict):
@@ -929,7 +1030,7 @@ def _with_training_num_states(train_states, num_states: int):
     )
     updated = dict(train_states)
     updated["num_states"] = count
-    if str(updated.get("kind", "states")).lower() != "haar":
+    if str(updated.get("kind", "states")).lower() != HAAR_PURE_TRAIN_STATES_KIND:
         raise ValueError("ntr sweeps can only update Haar train_states specs.")
     return updated
 
@@ -962,7 +1063,7 @@ def _resolve_test_state_request(
     test_state,
 ) -> tuple[str, object | None, int | None]:
     if test_state is None:
-        return "haar", None, None
+        return HAAR_PURE_AVERAGE_SELECTOR, None, None
 
     if isinstance(test_state, str):
         selector = _test_state_selector_from_string(test_state)
@@ -1040,14 +1141,12 @@ def make_qelm_training_context(
             dim=spec.data.d,
             rng=rng,
         )
-    dataset = QELMQuantumDataset.from_povm(
-        povm,
+    return QELMTrainingContext(
+        povm=povm,
         train_states=train_states,
         test_states=test_states,
         rcond=spec.numerics.rcond,
     )
-    # computation of things like dual stuff is handled in _context_from_dataset, which constructs the QELMTrainingContext from the dataset
-    return _context_from_dataset(dataset)
 
 
 def resolve_qelm_test(
@@ -1057,10 +1156,8 @@ def resolve_qelm_test(
 ) -> ResolvedTest:
     rng = get_rng(rng)
     test_selector, fixed_test_state, test_num_points = _resolve_test_state_request(spec.test.state)
-    P = context.P_train
-    ntr = P.shape[1]
 
-    if test_selector == "haar":
+    if test_selector == HAAR_PURE_AVERAGE_SELECTOR:
         return ResolvedTest(
             mode=test_selector,
             average="exact_haar_second_moment",
@@ -1070,13 +1167,17 @@ def resolve_qelm_test(
         )
 
     if test_selector == "haar_sample":
+        P_test = context.P_test
+        dual_P_test = context.dual_P_test
+        if P_test is None or dual_P_test is None or context.test_states is None:
+            raise ValueError("Haar-sample test resolution requires sampled test states.")
         return ResolvedTest(
             mode=test_selector,
             average="sampled_haar_states",
-            num_points=context.P_test.shape[1],
-            probabilities=context.P_test,
-            dual_probabilities=context.dual_P_test,
-            states=context.test_states,
+            num_points=P_test.shape[1],
+            probabilities=P_test,
+            dual_probabilities=dual_P_test,
+            states=context.test_states.states,
         )
 
     if test_selector == "fixed_state":
@@ -1087,15 +1188,11 @@ def resolve_qelm_test(
             dim=spec.data.d,
             name="test_state",
         )
-        probabilities = probability_matrix_from_operator_rows(
-            context.effect_rows,
-            state_batch.state_rows,
-            clip=True,
-        )
+        probabilities = context.povm.probability_matrix(state_batch)
         probabilities /= probabilities.sum(axis=0, keepdims=True)
-        dual_probabilities = probability_matrix_from_operator_rows(
+        dual_probabilities = _operator_row_inner_products(
             context.dual_effect_rows,
-            state_batch.state_rows,
+            state_batch._state_rows,
             clip=False,
         )
         return ResolvedTest(
@@ -1107,6 +1204,9 @@ def resolve_qelm_test(
             states=state_batch.states,
         )
 
+    P = context.P_train
+    ntr = P.shape[1]
+
     if test_selector == "training_mean":
         return ResolvedTest(
             mode=test_selector,
@@ -1114,7 +1214,7 @@ def resolve_qelm_test(
             num_points=ntr,
             probabilities=P,
             dual_probabilities=context.dual_P_train,
-            states=context.train_states,
+            states=context.train_states.states,
         )
 
     if test_selector == "training_subset":
@@ -1126,7 +1226,7 @@ def resolve_qelm_test(
             num_points=count,
             probabilities=P[:, indices],
             dual_probabilities=context.dual_P_train[:, indices],
-            states=None if context.train_states is None else context.train_states[indices],
+            states=context.train_states.states[indices],
         )
 
     if test_selector == "training_column":
@@ -1137,7 +1237,7 @@ def resolve_qelm_test(
             num_points=1,
             probabilities=P[:, [index]],
             dual_probabilities=context.dual_P_train[:, [index]],
-            states=None if context.train_states is None else context.train_states[[index]],
+            states=context.train_states.states[[index]],
         )
 
     raise ValueError(TILDE_U_TEST_STATE_ERROR)
@@ -1192,28 +1292,12 @@ def _operator_to_outcome_weights(
     if operator.ndim != 2 or operator.shape[0] != operator.shape[1]:
         raise ValueError("Operator target must have shape (d, d).")
     operator_row = operator.reshape(1, -1)
-    # this is the main step where the POVM dual effects are used to convert the operator target into a
-    # vector of outcome weights. The resulting weights may be complex for numerical bullshit, but for
-    # valid quantum states and observables they should be real, so we take the real part at the end.
-
-    # probability_matrix_from_operator_rows basically computes the matrix of HS inner product from the
-    # vectorized operators (flattened as rows). In this case it should give a matrix of shape (nout, 1)
-    # that corresponds to <tilde mu, O> where tilde mu are the POVM dual effects and O the observable/operator
-    weights = probability_matrix_from_operator_rows(
+    weights = _operator_row_inner_products(
         povm_dual_effect_rows,
         operator_row,
         clip=False,
     )[:, 0]
     return weights.real
-
-
-def _operator_from_outcome_weights(
-    weights: np.ndarray,
-    povm_effects: np.ndarray | None,
-) -> np.ndarray | None:
-    if povm_effects is None:
-        return None
-    return np.tensordot(np.asarray(weights, dtype=float), povm_effects, axes=(0, 0))
 
 
 def _fixed_target_from_weights(
@@ -1225,16 +1309,36 @@ def _fixed_target_from_weights(
     raw_operator: np.ndarray | None = None,
 ) -> ResolvedTarget:
     weights, scale = _normalize_target_vector(weights, P, target_normalization)
-    operator = raw_operator
-    if raw_operator is not None and scale > 0:
-        operator = np.asarray(raw_operator, dtype=complex) / scale
     return ResolvedTarget.fixed(
         kind=kind,
         normalization=target_normalization,
         scale=scale,
         weights=weights,
-        operator=operator,
+        operator=None,
         raw_operator=raw_operator,
+    )
+
+
+def _fixed_target_from_operator(
+    *,
+    kind: str,
+    operator: np.ndarray,
+    povm_dual_effect_rows: np.ndarray,
+    P: np.ndarray,
+    target_normalization: str,
+) -> ResolvedTarget:
+    weights = _operator_to_outcome_weights(operator, povm_dual_effect_rows)
+    _, scale = _normalize_target_vector(weights, P, target_normalization)
+    normalized_operator = operator
+    if scale > 0:
+        normalized_operator = np.asarray(operator, dtype=complex) / scale
+    return ResolvedTarget.fixed(
+        kind=kind,
+        normalization=target_normalization,
+        scale=scale,
+        weights=None,
+        operator=normalized_operator,
+        raw_operator=operator,
     )
 
 
@@ -1263,16 +1367,12 @@ def _average_target_from_second_moment(
 def resolve_qelm_target(
     spec: QELMTrainingSpec,
     context: QELMTrainingContext,
-    diagnostics: TildeUDiagnostics,
     rng: np.random.Generator | int | None = None,
 ) -> ResolvedTarget:
     rng = get_rng(rng)
-    blocks = diagnostics["blocks"]
     target_observable = spec.target.observable
     target_normalization = spec.target.normalization
     P = context.P_train
-    U1 = blocks["U1"]
-    rank = _rank_from_spec(spec)  # NOTE: this seems not used, might be removable?
     dim = spec.data.d
     nout = P.shape[0]
 
@@ -1281,35 +1381,35 @@ def resolve_qelm_target(
 
     if isinstance(target_observable, str):
         key = target_observable.lower()
-        if key == "haar_pure_state_average":
+        if key == HAAR_PURE_AVERAGE_SELECTOR:
             _, target_second = haar_moments_from_operator_rows(
                 context.povm_dual_effect_rows,
                 dim=dim,
             )
             return _average_target_from_second_moment(
-                kind="haar_pure_state",
+                kind=HAAR_PURE_TRAIN_STATES_KIND,
                 average="exact_haar_second_moment",
                 second_moment=target_second,
                 P=P,
                 target_normalization=target_normalization,
             )
         if key == "random_haar_pure_state":
-            vector = generate_haar_random_state_vector_columns(
+            vector = generate_haar_random_kets(
                 num_states=1,
                 dim=dim,
                 rng=rng,
             )[:, 0]
             operator = np.outer(vector, vector.conj())
-            return _fixed_target_from_weights(
+            return _fixed_target_from_operator(
                 kind="random_haar_pure_state",
-                weights=_operator_to_outcome_weights(operator, context.povm_dual_effect_rows),
+                operator=operator,
+                povm_dual_effect_rows=context.povm_dual_effect_rows,
                 P=P,
                 target_normalization=target_normalization,
-                raw_operator=operator,
             )
         raise ValueError(
             "Unknown target_observable string. Use 'random_haar_pure_state' "
-            "or 'haar_pure_state_average'."
+            "or 'haar_pure_average'."
         )
 
     # regardless of how target is provided, it is converted to a vector of outcome weights via the POVM dual effects, and then normalized according to target_normalization.
@@ -1324,13 +1424,12 @@ def resolve_qelm_target(
                 dim=dim,
                 name="target_observable",
             ).states[0]
-            # the main work is done here by _operator_to_outcome_weights, which uses the POVM dual effects to convert the operator target into a vector of outcome weights.
-            return _fixed_target_from_weights(
+            return _fixed_target_from_operator(
                 kind="pure_state",
-                weights=_operator_to_outcome_weights(operator, context.povm_dual_effect_rows),
+                operator=operator,
+                povm_dual_effect_rows=context.povm_dual_effect_rows,
                 P=P,
                 target_normalization=target_normalization,
-                raw_operator=operator,
             )
         if target.shape[0] != nout:
             raise ValueError(
@@ -1342,7 +1441,6 @@ def resolve_qelm_target(
             weights=target.astype(float),
             P=P,
             target_normalization=target_normalization,
-            raw_operator=_operator_from_outcome_weights(target, context.povm_effects),
         )
 
     if target.ndim == 2:
@@ -1350,12 +1448,12 @@ def resolve_qelm_target(
         if target.shape != (dim, dim):
             raise ValueError(f"Operator target must have shape ({dim}, {dim}).")
         operator = np.asarray(target, dtype=complex)
-        return _fixed_target_from_weights(
+        return _fixed_target_from_operator(
             kind="operator",
-            weights=_operator_to_outcome_weights(operator, context.povm_dual_effect_rows),
+            operator=operator,
+            povm_dual_effect_rows=context.povm_dual_effect_rows,
             P=P,
             target_normalization=target_normalization,
-            raw_operator=operator,
         )
 
     raise ValueError(
@@ -1691,6 +1789,13 @@ def estimate_actual_training_mse(
     test_second_moment: np.ndarray | None = None,
     lstsq_rcond: float | None = None,
 ) -> dict:
+    """Estimate QELM training error by Monte Carlo over noisy training matrices.
+
+    The input ``P`` is the exact training probability/design matrix.  Each
+    Monte Carlo repeat samples a noisy design matrix ``P_hat`` with
+    ``noisy_probability_matrix`` and refits the observable weights against the
+    noiseless training labels ``P.T @ w_observable``.
+    """
     rng = get_rng(rng)
     if actual_noise_trials <= 0:
         raise ValueError("actual_noise_trials must be positive.")
@@ -1701,7 +1806,7 @@ def estimate_actual_training_mse(
     deltas = []
 
     for _ in range(actual_noise_trials):
-        P_hat = _noisy_training_matrix(P, rng, N=N, noise=noise)
+        P_hat = noisy_probability_matrix(P, rng, Nshots=N, noise=noise)
         w_hat = np.linalg.lstsq(P_hat.T, y_train, rcond=lstsq_rcond)[0]
         deltas.append(w_hat - w_observable)
 
@@ -1757,6 +1862,12 @@ def estimate_actual_training_mse_target_average(
     test_second_moment: np.ndarray | None = None,
     lstsq_rcond: float | None = None,
 ) -> dict:
+    """Estimate training error averaged over a target-observable ensemble.
+
+    This is the target-average counterpart of ``estimate_actual_training_mse``:
+    each repeat samples a noisy design matrix ``P_hat`` and fits the linear map
+    from noisy training probabilities back to exact training probabilities.
+    """
     rng = get_rng(rng)
     if actual_noise_trials <= 0:
         raise ValueError("actual_noise_trials must be positive.")
@@ -1774,7 +1885,7 @@ def estimate_actual_training_mse_target_average(
     identity = np.eye(P.shape[0])
 
     for _ in range(actual_noise_trials):
-        P_hat = _noisy_training_matrix(P, rng, N=N, noise=noise)
+        P_hat = noisy_probability_matrix(P, rng, Nshots=N, noise=noise)
         fit_matrix = np.linalg.lstsq(P_hat.T, P.T, rcond=lstsq_rcond)[0]
         deltas.append(fit_matrix - identity)
 
@@ -1802,8 +1913,19 @@ def estimate_actual_training_mse_target_average(
     }
 
 
+def _target_outcome_weights(target: ResolvedTarget, context: QELMTrainingContext) -> np.ndarray:
+    if target.is_average:
+        raise ValueError("Averaged targets do not have a single outcome-weight vector.")
+    if target.weights is not None:
+        return np.asarray(target.weights, dtype=float)
+    if target.operator is None:
+        raise ValueError("Fixed target must provide weights or an operator.")
+    return _operator_to_outcome_weights(target.operator, context.povm_dual_effect_rows)
+
+
 def _leading_terms_for_target(
     *,
+    context: QELMTrainingContext,
     target: ResolvedTarget,
     P: np.ndarray,
     U1: np.ndarray,
@@ -1841,7 +1963,7 @@ def _leading_terms_for_target(
         U1=U1,
         U2=U2,
         C22_inv_C21=C22_inv_C21,
-        w_observable=target.weights,
+        w_observable=_target_outcome_weights(target, context),
         singular_values=singular_values,
         N=N,
         approximate_identity=approximate_identity,
@@ -1873,6 +1995,7 @@ def _compute_qelm_leading_error_resolved(
     blocks = diagnostics["blocks"]
     N = _required_noise_N(spec.noise)
     metrics = _leading_terms_for_target(
+        context=context,
         target=target,
         test=test,
         P=context.P_train,
@@ -1934,14 +2057,19 @@ def _run_qelm_training_resolved(
 
     if target.is_average:
         # in this branch we compute the average over target observables
-        # this is to compute the exact haar average training error by simulating the training process with noise
+        # this is to compute the exact Haar pure-state average training error by simulating the training process with noise
         target_second_moment = np.asarray(target.second_moment, dtype=float)
+        # the purpose of this line is to enable the general formula with einsum regardless
+        # of whether the test is a single state or an average over states.
+        # If the test is a single state, its "second moment" is just the outer product of
+        # its probability vector with itself, which is what _test_second_moment computes.
         test_second_moment = _test_second_moment(test)
         fit_matrices = []
         identity = np.eye(P.shape[0])
 
         for _ in range(actual_noise_trials):
-            P_hat = _noisy_training_matrix(P, rng, N=N, noise=noise)
+            P_hat = noisy_probability_matrix(P, rng, Nshots=N, noise=noise)
+            # this produces (P_hat.T^+ @ P.T) = (P @ P_hat^+)^T
             fit_matrix = np.linalg.lstsq(P_hat.T, P.T, rcond=lstsq_rcond)[0]
             fit_matrices.append(fit_matrix)
 
@@ -1972,14 +2100,14 @@ def _run_qelm_training_resolved(
             fit_matrices=stored_fit_matrices,
         )
 
-    w_observable = np.asarray(target.weights, dtype=float)
+    w_observable = _target_outcome_weights(target, context)
     y_train = P.T @ w_observable
     fitted_weights = []
     fit_matrices = [] if return_fit_matrix else None
 
     # this is where we actually compute P^+ for noisy matrices
     for _ in range(actual_noise_trials):
-        P_hat = _noisy_training_matrix(P, rng, N=N, noise=noise)
+        P_hat = noisy_probability_matrix(P, rng, Nshots=N, noise=noise)
         if return_fit_matrix and fit_matrices is not None:
             fit_matrix = np.linalg.lstsq(P_hat.T, P.T, rcond=lstsq_rcond)[0]
             fit_matrices.append(fit_matrix)
@@ -2085,20 +2213,6 @@ def with_training_sweep_value(
     if sweep_col == "N":
         return replace(spec, noise=replace(spec.noise, N=int(value)))
     raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
-
-
-def _noisy_training_matrix(
-    P: np.ndarray,
-    rng: np.random.Generator | int | None,
-    *,
-    N: int,
-    noise: str,
-) -> np.ndarray:
-    rng = get_rng(rng)
-    if noise == "multinomial":
-        return sample_finite_shot_probability_matrix(P, N=N, rng=rng)
-    Xi = shot_noise_matrix(P, rng, Nshots=N, noise=noise)
-    return P + Xi / np.sqrt(N)
 
 
 def _test_second_moment(test: ResolvedTest) -> np.ndarray:

@@ -1,3 +1,18 @@
+"""Shot-noise models for probability matrices.
+
+This module distinguishes two related objects:
+
+* ``Xi`` is the scaled fluctuation, ``Xi = sqrt(N) * (P_hat - P)``.  The
+  block-diagnostic code in :mod:`qelm_rank.trials` projects ``Xi`` into SVD
+  blocks and studies its Schur-complement quantities.
+* ``P_hat`` is the noisy empirical probability matrix used as a design matrix
+  in actual QELM least-squares training.  Use ``noisy_probability_matrix`` for
+  that object.
+
+All probability-matrix shot-noise routing goes through ``sample_shot_noise``.
+The public helpers ``shot_noise_matrix`` and ``noisy_probability_matrix`` only
+select the requested output representation.
+"""
 
 from typing import Dict
 
@@ -16,57 +31,170 @@ def clean_probability_vector(p: np.ndarray) -> np.ndarray:
     return p / total
 
 
+def clean_probability_matrix_columns(P: np.ndarray, *, atol: float = 1e-12) -> np.ndarray:
+    """Validate and normalize probability-matrix columns."""
+    P = np.asarray(P, dtype=float)
+    if P.ndim != 2:
+        raise ValueError("P must be a 2D array.")
+    if not np.all(np.isfinite(P)):
+        raise ValueError("P contains non-finite entries.")
+    if np.any(P < -atol):
+        raise ValueError("P has negative entries beyond tolerance.")
+
+    P = np.where((P < 0.0) & (P >= -atol), 0.0, P)
+    col_sums = P.sum(axis=0, keepdims=True)
+    if np.any(col_sums <= 0):
+        raise ValueError("Each column of P must have positive total probability mass.")
+    return P / col_sums
+
+
+def _validate_shot_count(N: int, *, name: str = "N") -> int:
+    if int(N) != N or N <= 0:
+        raise ValueError(f"{name} must be a positive integer.")
+    return int(N)
+
+
+def _sample_multinomial_probability_matrix(
+    P: np.ndarray,
+    *,
+    N: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    nout, ntr = P.shape
+    P_hat = np.empty((nout, ntr), dtype=float)
+
+    for i in range(ntr):
+        P_hat[:, i] = rng.multinomial(N, P[:, i]) / N
+
+    return P_hat
+
+
+def sample_finite_shot_probability_matrix(
+    P: np.ndarray,
+    N: int,
+    rng: np.random.Generator | int | None = None,
+    *,
+    atol: float = 1e-12,
+) -> np.ndarray:
+    """Sample empirical multinomial probabilities from exact columns.
+
+    Returns ``P_hat[:, i] = Multinomial(N, P[:, i]) / N`` for each column.
+    This is the single implementation that draws finite-shot multinomial
+    counts; scaled multinomial fluctuations are derived from this same draw.
+    """
+    N = _validate_shot_count(N)
+    rng = get_rng(rng)
+    P = clean_probability_matrix_columns(P, atol=atol)
+    return _sample_multinomial_probability_matrix(P, N=N, rng=rng)
+
+
 def generate_multinomial_Xi(
     P: np.ndarray,
     N: int,
     rng: np.random.Generator | int | None = None,
 ) -> np.ndarray:
+    """Generate scaled finite-shot multinomial fluctuations.
+
+    Returns a matrix ``Xi`` with columns
+    ``Xi_i = sqrt(N) * (counts_i / N - p_i)``, where
+    ``counts_i ~ Multinomial(N, p_i)``.  This is not the sampled probability
+    matrix itself; use ``noisy_probability_matrix`` when the desired output is
+    ``P_hat = counts / N``.
     """
-    Generate Xi with columns Xi_i = sqrt(N) * (counts_i/N - p_i),
-    counts_i ~ Multinomial(N, p_i).
-    """
+    N = _validate_shot_count(N)
     rng = get_rng(rng)
-    nout, ntr = P.shape
-    Xi = np.empty_like(P, dtype=float)
+    P = clean_probability_matrix_columns(P)
+    P_hat = _sample_multinomial_probability_matrix(P, N=N, rng=rng)
+    return np.sqrt(N) * (P_hat - P)
 
-    for i in range(ntr):
-        probs = P[:, i]
-        # Small numerical cleanup.
-        probs = np.maximum(probs, 0.0)
-        probs = probs / probs.sum()
-
-        counts = rng.multinomial(N, probs)
-        Xi[:, i] = np.sqrt(N) * (counts / N - probs)
-
-    return Xi
 
 def generate_gaussian_Xi(
     P: np.ndarray,
     rng: np.random.Generator | int | None = None,
 ) -> np.ndarray:
-    """
-    Generate Gaussian Xi_i ~ N(0, diag(p_i)-p_i p_i^T).
+    """Generate scaled Gaussian shot-noise fluctuations.
 
-    Efficient construction:
-    x = sqrt(p_i) * g,
-    y = x - p_i * sum(x).
-    Then Cov(y)=diag(p_i)-p_i p_i^T.
+    Generates columns ``Xi_i ~ N(0, diag(p_i)-p_i p_i^T)``, the large-shot
+    limit of ``sqrt(N) * (P_hat_i - p_i)``.  The result is independent of
+    ``N`` because the ``sqrt(N)`` scaling is already included.
     """
     rng = get_rng(rng)
+    P = clean_probability_matrix_columns(P)
+    return _generate_gaussian_Xi_from_clean(P, rng=rng)
+
+
+def _generate_centered_gaussian_Xi_from_clean(
+    P: np.ndarray,
+    *,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    nout, ntr = P.shape
+    # Average covariance:
+    # Sigma_bar = mean_i [diag(p_i) - p_i p_i^T]
+    mean_probs = P.mean(axis=1)
+    cov_matrix = np.diag(mean_probs) - (P @ P.T) / ntr
+    cov_matrix = 0.5 * (cov_matrix + cov_matrix.T)
+    return rng.multivariate_normal(
+        mean=np.zeros(nout),
+        cov=cov_matrix,
+        size=ntr,
+        check_valid="warn",
+    ).T
+
+def _generate_gaussian_Xi_from_clean(
+    P: np.ndarray,
+    *,
+    rng: np.random.Generator,
+) -> np.ndarray:
     nout, ntr = P.shape
     Xi = np.empty_like(P, dtype=float)
-
     G = rng.standard_normal(size=P.shape)
-
     for i in range(ntr):
         probs = P[:, i]
-        probs = np.maximum(probs, 0.0)
-        probs = probs / probs.sum()
-
         x = np.sqrt(probs) * G[:, i]
         Xi[:, i] = x - probs * np.sum(x)
 
     return Xi
+
+def sample_shot_noise(
+    P: np.ndarray,
+    rng: np.random.Generator | int | None = None,
+    *,
+    Nshots: int = 10_000,
+    noise: str = "gaussian",
+    output: str = "xi",
+    atol: float = 1e-12,
+) -> np.ndarray:
+    """Route a probability matrix through one supported shot-noise model.
+
+    ``output="xi"`` returns the scaled fluctuation
+    ``Xi = sqrt(Nshots) * (P_hat - P)``. ``output="probability"`` returns the
+    noisy design matrix ``P_hat``.
+    """
+    Nshots = _validate_shot_count(Nshots, name="Nshots")
+    rng = get_rng(rng)
+    P = clean_probability_matrix_columns(P, atol=atol)
+
+    if output not in {"xi", "probability"}:
+        raise ValueError("output must be 'xi' or 'probability'.")
+
+    if noise == "multinomial":
+        P_hat = _sample_multinomial_probability_matrix(P, N=Nshots, rng=rng)
+        if output == "probability":
+            return P_hat
+        return np.sqrt(Nshots) * (P_hat - P)
+
+    if noise == "gaussian":
+        Xi = _generate_gaussian_Xi_from_clean(P, rng=rng)
+    elif noise == "centered_gaussian":
+        Xi = _generate_centered_gaussian_Xi_from_clean(P, rng=rng)
+    else:
+        raise ValueError(f"Unknown noise type: {noise!r}")
+
+    if output == "xi":
+        return Xi
+    return P + Xi / np.sqrt(Nshots)
+
 
 def shot_noise_matrix(
     P: np.ndarray,
@@ -74,95 +202,32 @@ def shot_noise_matrix(
     Nshots: int = 10_000,
     noise: str = "gaussian",
 ) -> np.ndarray:
-    """
-    Generate the scaled shot-noise matrix Xi.
+    """Generate the scaled shot-noise matrix ``Xi``."""
+    return sample_shot_noise(
+        P,
+        rng=rng,
+        Nshots=Nshots,
+        noise=noise,
+        output="xi",
+    )
 
-    Xi_i = sqrt(Nshots) * (p_hat_i - p_i). The Gaussian option samples the
-    large-shot scaled limit and ignores Nshots.
 
-    For noise == "centered_gaussian", each column is sampled independently from
-    N(0, Sigma_bar), where Sigma_bar is the average of the column covariance
-    matrices diag(p_i) - p_i p_i^T.
-    """
-    rng = get_rng(rng)
-    P = np.maximum(np.asarray(P, dtype=float), 0.0)
+def noisy_probability_matrix(
+    P: np.ndarray,
+    rng: np.random.Generator | int | None = None,
+    *,
+    Nshots: int,
+    noise: str = "gaussian",
+) -> np.ndarray:
+    """Sample the noisy probability/design matrix used by training."""
+    return sample_shot_noise(
+        P,
+        rng=rng,
+        Nshots=Nshots,
+        noise=noise,
+        output="probability",
+    )
 
-    col_sums = P.sum(axis=0, keepdims=True)
-    if np.any(col_sums <= 0):
-        raise ValueError("Each column of P must have positive total probability mass.")
-
-    P = P / col_sums
-
-    if noise == "gaussian":
-        return generate_gaussian_Xi(P, rng=rng)
-
-    if noise == "multinomial":
-        return generate_multinomial_Xi(P, N=Nshots, rng=rng)
-
-    if noise == "centered_gaussian":
-        nout, ntr = P.shape
-
-        # Average covariance:
-        # Sigma_bar = mean_i [diag(p_i) - p_i p_i^T]
-        mean_probs = P.mean(axis=1)
-        cov_matrix = np.diag(mean_probs) - (P @ P.T) / ntr
-
-        # Symmetrize to remove tiny numerical asymmetries.
-        cov_matrix = 0.5 * (cov_matrix + cov_matrix.T)
-
-        # Sample ntr independent columns from N(0, cov_matrix).
-        Xi = rng.multivariate_normal(
-            mean=np.zeros(nout),
-            cov=cov_matrix,
-            size=ntr,
-            check_valid="warn",
-        ).T
-
-        return Xi
-
-    raise ValueError(f"Unknown noise type: {noise!r}")
-
-# def shot_noise_matrix(
-#     P: np.ndarray,
-#     rng: np.random.Generator,
-#     Nshots: int = 10_000,
-#     noise: str = "gaussian",
-# ) -> np.ndarray:
-#     """
-#     Generate the scaled shot-noise matrix Xi.
-
-#     Xi_i = sqrt(Nshots) * (p_hat_i - p_i). The Gaussian option samples the
-#     large-shot scaled limit and ignores Nshots.
-#     """
-#     P = np.maximum(np.asarray(P, dtype=float), 0.0)
-#     P = P / P.sum(axis=0, keepdims=True)
-
-#     if noise == "gaussian":
-#         return generate_gaussian_Xi(P, rng=rng)
-
-#     if noise == "multinomial":
-#         return generate_multinomial_Xi(P, N=Nshots, rng=rng)
-
-#     if noise == 'centered_gaussian':
-#         # in this case sample each column as a centered Gaussian distribution with covariance matrix
-#         # that's the haar average of the covariance matrices, that is,
-#         # \bar\Sigma_{ab} = tr(\mu_a)/d \delta_{ab} - \frac{tr(\mu_a)tr(\mu_b)+tr(\mu_a \mu_b)}{d(d+1)}
-#         # where \mu_a is the a-th measurement operator, and d is the dimension of the Hilbert space.
-#         nout, ntr = P.shape
-#         Xi = np.empty_like(P, dtype=float)
-#         for i in range(ntr):
-#             probs = P[:, i]
-#             probs = np.maximum(probs, 0.0)
-#             probs = probs / probs.sum()
-
-#             # Compute the covariance matrix for the centered Gaussian noise
-#             d = nout  # Assuming the dimension of the Hilbert space is equal to nout
-#             cov_matrix = np.diag(probs) - np.outer(probs, probs)
-
-#             # Sample from the centered Gaussian distribution
-#             Xi[:, i] = rng.multivariate_normal(mean=np.zeros(nout), cov=cov_matrix)
-
-#     raise ValueError("noise must be either 'gaussian' or 'multinomial'.")
 
 def project_noise_blocks(Xi: np.ndarray, blocks: PBlocks) -> Dict[str, np.ndarray]:
     """

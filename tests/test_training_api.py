@@ -1,5 +1,9 @@
 import numpy as np
+import pandas as pd
+import pytest
 
+import qelm_rank.training as training
+import qelm_rank.workflows as workflows
 from qelm_rank import (
     QELMDataSpec,
     QELMNoiseSpec,
@@ -16,11 +20,13 @@ from qelm_rank import (
     compute_qelm_leading_error,
     generate_random_rank1_povm,
     leading_training_bias_variance_terms,
+    load_tilde_u_training_approx_report_data,
     make_qelm_training_context,
     resolve_qelm_target,
     resolve_qelm_test,
     run_qelm_actual_training,
     run_tilde_u_training_approx_experiment,
+    run_tilde_u_training_approx_report,
     set_default_rng,
     tilde_u_correction_operator_diagnostics,
 )
@@ -28,7 +34,7 @@ from qelm_rank import (
 
 def _small_spec(*, povm=None, target=None, train_states=None, ntr=12):
     if train_states is None:
-        train_states = {"kind": "haar", "num_states": ntr}
+        train_states = {"kind": "haar_pure", "num_states": ntr}
     return QELMTrainingSpec(
         data=QELMDataSpec(d=2, nout=8, povm=povm, train_states=train_states),
         target=QELMTargetRequest(observable=target, normalization="none"),
@@ -45,8 +51,120 @@ def test_fixed_explicit_povm_is_used_in_training_context():
     context = make_qelm_training_context(spec, rng=np.random.default_rng(456))
 
     assert context.P_train.shape == (8, 12)
-    np.testing.assert_allclose(context.effect_rows, povm.reshape(8, -1))
-    np.testing.assert_allclose(context.povm_effects, povm)
+    np.testing.assert_allclose(context.povm.effects, povm)
+
+
+def test_training_context_pairwise_quantities_are_lazy_and_cached():
+    povm = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
+    spec = _small_spec(povm=povm)
+
+    context = make_qelm_training_context(spec, rng=np.random.default_rng(456))
+
+    assert context._P_train_cache is None
+    assert context._dual_effect_rows_cache is None
+    assert context._dual_P_train_cache is None
+    assert context._test_second_cache is None
+    assert context._dual_test_second_cache is None
+    assert context.povm._effect_rows_cache is None
+    assert context.train_states._state_rows_cache is None
+
+    P_train = context.P_train
+
+    assert context._P_train_cache is P_train
+    assert context.P_train is P_train
+    assert context.povm._effect_rows_cache is None
+    assert context.train_states._state_rows_cache is None
+    assert context._dual_effect_rows_cache is None
+
+    dual_effect_rows = context.dual_effect_rows
+
+    assert context._dual_effect_rows_cache is dual_effect_rows
+    assert context.dual_effect_rows is dual_effect_rows
+    assert context.rcond in context.povm._dual_effect_rows_cache
+    assert context.rcond in context.train_states._frame_pinv_cache
+    assert context.povm._effect_rows_cache is not None
+    assert context.train_states._state_rows_cache is not None
+
+    test_second = context.test_second
+
+    assert context._test_second_cache is test_second
+    assert context.test_second is test_second
+
+
+def test_sampled_test_matrices_are_lazy_and_cached():
+    povm = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            nout=8,
+            povm=povm,
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        test=QELMTestRequest(state={"kind": "haar_sample", "num_points": 3}),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=2),
+    )
+
+    context = make_qelm_training_context(spec, rng=np.random.default_rng(456))
+
+    assert isinstance(context.test_states, QuantumStateBatch)
+    assert context._P_test_cache is None
+    assert context._dual_P_test_cache is None
+    assert context._dual_effect_rows_cache is None
+
+    P_test = context.P_test
+
+    assert context._P_test_cache is P_test
+    assert context.P_test is P_test
+    assert context._dual_P_test_cache is None
+    assert context._dual_effect_rows_cache is None
+
+    dual_P_test = context.dual_P_test
+
+    assert context._dual_P_test_cache is dual_P_test
+    assert context.dual_P_test is dual_P_test
+    assert context._dual_effect_rows_cache is not None
+
+
+def test_explicit_array_povm_allows_omitting_nout():
+    rng = np.random.default_rng(123)
+    povm = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            povm=povm,
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        test=QELMTestRequest(state="haar_pure_average"),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=2),
+    )
+
+    run = QELMRun(spec, rng=np.random.default_rng(456))
+
+    assert spec.data.nout == 8
+    assert run.context.P_train.shape == (8, 12)
+    np.testing.assert_allclose(run.context.povm.effects, povm)
+
+
+def test_explicit_povm_object_allows_omitting_nout():
+    effects = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
+    povm = POVMEffects.from_effects(effects, dim=2)
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            povm=povm,
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        test=QELMTestRequest(state="haar_pure_average"),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=2),
+    )
+
+    context = make_qelm_training_context(spec, rng=np.random.default_rng(456))
+
+    assert spec.data.nout == 8
+    assert context.P_train.shape == (8, 12)
 
 
 def test_fixed_explicit_training_states_are_used_in_training_context():
@@ -62,7 +180,8 @@ def test_fixed_explicit_training_states_are_used_in_training_context():
 
     expected = POVMEffects.from_effects(povm, dim=2, nout=8).probability_matrix(train_states)
     np.testing.assert_allclose(context.P_train, expected, atol=1e-12)
-    np.testing.assert_allclose(context.train_states, train_states.states)
+    assert isinstance(context.train_states, QuantumStateBatch)
+    np.testing.assert_allclose(context.train_states.states, train_states.states)
 
 
 def test_training_state_vector_columns_are_accepted():
@@ -105,14 +224,21 @@ def test_qelm_data_spec_requires_training_states():
 
 
 def test_flexible_haar_training_states_require_sweep_count():
-    spec = _small_spec(train_states={"kind": "haar"})
+    spec = _small_spec(train_states={"kind": "haar_pure"})
 
     with np.testing.assert_raises(ValueError):
         make_qelm_training_context(spec, rng=np.random.default_rng(123))
 
 
-def test_training_state_alias_is_rejected():
-    spec = _small_spec(train_states={"kind": "haar_pure", "num_states": 12})
+@pytest.mark.parametrize(
+    "train_states",
+    [
+        "haar",
+        {"kind": "haar", "num_states": 12},
+    ],
+)
+def test_old_haar_training_state_selector_is_rejected(train_states):
+    spec = _small_spec(train_states=train_states)
 
     with np.testing.assert_raises_regex(ValueError, "train_states is required"):
         make_qelm_training_context(spec, rng=np.random.default_rng(123))
@@ -149,7 +275,7 @@ def test_test_state_alias_is_rejected():
         data=spec.data,
         target=spec.target,
         noise=spec.noise,
-        test=QELMTestRequest(state="haar_average"),
+        test=QELMTestRequest(state="haar"),
         numerics=spec.numerics,
     )
 
@@ -158,12 +284,11 @@ def test_test_state_alias_is_rejected():
 
 
 def test_target_alias_is_rejected():
-    spec = _small_spec(target="haar_average")
+    spec = _small_spec(target="haar_pure_state_average")
     context = make_qelm_training_context(spec, rng=np.random.default_rng(123))
-    diagnostics = compute_qelm_diagnostics(spec, context)
 
     with np.testing.assert_raises_regex(ValueError, "Unknown target_observable string"):
-        resolve_qelm_target(spec, context, diagnostics, rng=np.random.default_rng(456))
+        resolve_qelm_target(spec, context, rng=np.random.default_rng(456))
 
 
 def test_actual_training_returns_weight_shapes_and_optional_fits():
@@ -245,7 +370,7 @@ def test_resolved_training_column_test_carries_raw_state_operator():
     test = resolve_qelm_test(spec, context, rng=np.random.default_rng(789))
 
     assert test.states.shape == (1, 2, 2)
-    assert any(np.allclose(test.states[0], state) for state in context.train_states)
+    assert any(np.allclose(test.states[0], state) for state in context.train_states.states)
 
 
 def test_resolved_target_carries_raw_and_normalized_operator():
@@ -261,12 +386,12 @@ def test_resolved_target_carries_raw_and_normalized_operator():
         numerics=spec.numerics,
     )
     context = make_qelm_training_context(spec, rng=np.random.default_rng(123))
-    diagnostics = compute_qelm_diagnostics(spec, context)
 
-    target = resolve_qelm_target(spec, context, diagnostics, rng=np.random.default_rng(456))
+    target = resolve_qelm_target(spec, context, rng=np.random.default_rng(456))
 
     np.testing.assert_allclose(target.raw_operator, target_operator)
     np.testing.assert_allclose(target.operator, target_operator / target.scale)
+    assert target.weights is None
 
 
 def test_qelm_run_from_context_reuses_existing_context():
@@ -307,7 +432,7 @@ def test_actual_training_does_not_store_per_trial_fits_by_default():
 
 
 def test_target_average_training_returns_fit_matrix():
-    spec = _small_spec(target="haar_pure_state_average")
+    spec = _small_spec(target="haar_pure_average")
 
     analysis = analyze_qelm_training(spec, rng=np.random.default_rng(123))
 
@@ -341,7 +466,7 @@ def test_leading_error_matches_existing_low_level_function():
     context = make_qelm_training_context(spec, rng)
     test = resolve_qelm_test(spec, context, rng)
     diagnostics = compute_qelm_diagnostics(spec, context)
-    target = resolve_qelm_target(spec, context, diagnostics, rng)
+    target = resolve_qelm_target(spec, context, rng)
 
     result = compute_qelm_leading_error(
         spec,
@@ -355,7 +480,7 @@ def test_leading_error_matches_existing_low_level_function():
         U1=blocks["U1"],
         U2=blocks["U2"],
         C22_inv_C21=diagnostics["C22_inv_C21"],
-        w_observable=target.weights,
+        w_observable=training._target_outcome_weights(target, context),
         singular_values=blocks["singular_values"],
         N=spec.noise.N,
         approximate_identity=False,
@@ -372,7 +497,7 @@ def test_leading_error_matches_existing_low_level_function():
 
 def test_spec_based_tilde_u_experiment_runs():
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
-    base = _small_spec(target=target, train_states={"kind": "haar"})
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
     study = TildeUTrainingApproxStudySpec(
         base=base,
         sweep_col="ntr",
@@ -389,9 +514,9 @@ def test_spec_based_tilde_u_experiment_runs():
     assert len(summary) == 2
 
 
-def test_spec_based_tilde_u_experiment_accepts_haar_string_training_states():
+def test_spec_based_tilde_u_experiment_accepts_haar_pure_string_training_states():
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
-    base = _small_spec(target=target, train_states="haar")
+    base = _small_spec(target=target, train_states="haar_pure")
     study = TildeUTrainingApproxStudySpec(
         base=base,
         sweep_col="ntr",
@@ -432,6 +557,218 @@ def test_spec_based_tilde_u_N_sweep_can_supply_missing_base_noise_N():
     assert len(raw) == 2
     assert set(raw["N"]) == {10, 20}
     assert set(summary["N"]) == {10, 20}
+
+
+def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    output_file = tmp_path / "tilde_u_sweep"
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12, 16),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=output_file,
+    )
+
+    raw, summary, slopes = run_tilde_u_training_approx_report(study)
+
+    saved_path = output_file.with_suffix(".zip")
+    assert saved_path.exists()
+    loaded = load_tilde_u_training_approx_report_data(saved_path)
+    assert set(loaded) == {"raw", "metadata"}
+    assert list(loaded["raw"].columns) == [
+        "trial",
+        "ntr",
+        "leading_bias_sq",
+        "leading_variance",
+        "identity_leading_bias_sq",
+        "identity_leading_variance",
+        "mse",
+        "bias_sq",
+        "variance",
+    ]
+    pd.testing.assert_series_equal(
+        loaded["raw"]["mse"],
+        raw["actual_mse"],
+        check_names=False,
+    )
+    assert "trial_seed" not in loaded["raw"].columns
+    assert "error" not in loaded["raw"].columns
+    assert "r" not in loaded["raw"].columns
+    assert "p_kernel" not in loaded["raw"].columns
+    assert loaded["metadata"]["created_at"]
+    assert loaded["metadata"]["completed_at"]
+    assert loaded["metadata"]["elapsed_seconds"] >= 0.0
+    assert "format" not in loaded["metadata"]
+    assert "x_col" not in loaded["metadata"]
+    assert "study" not in loaded["metadata"]
+    assert "base_spec" not in loaded["metadata"]
+    assert "concrete_specs" not in loaded["metadata"]
+    assert loaded["metadata"]["repetitions"] == study.repetitions
+    assert loaded["metadata"]["data"]["d"] == base.data.d
+    assert loaded["metadata"]["data"]["povm"]["kind"] == "random_rank1"
+    assert loaded["metadata"]["data"]["train_states"]["kind"] == "haar_pure"
+    assert loaded["metadata"]["target"]["observable"]["kind"] == "operator"
+    assert loaded["metadata"]["target"]["observable"]["operator"]["shape"] == [2, 2]
+    assert loaded["metadata"]["test"]["state"]["kind"] == "fixed_state"
+    assert loaded["metadata"]["test"]["state"]["state"]["shape"] == [2, 2]
+    assert loaded["metadata"]["sweep_col"] == "ntr"
+    assert loaded["metadata"]["sweep_values"] == [12, 16]
+
+
+def test_tilde_u_report_rejects_pickle_output(tmp_path):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12,),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=tmp_path / "tilde_u_sweep.pkl",
+    )
+
+    with pytest.raises(ValueError, match=r"must end in \.zip"):
+        run_tilde_u_training_approx_report(study)
+
+
+def test_tilde_u_report_avoids_overwriting_existing_output(tmp_path):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    output_file = tmp_path / "tilde_u_sweep.zip"
+    output_file.write_bytes(b"existing report")
+    (tmp_path / "tilde_u_sweep_1.zip").write_bytes(b"existing numbered report")
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12,),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=output_file,
+    )
+
+    run_tilde_u_training_approx_report(study)
+
+    assert output_file.read_bytes() == b"existing report"
+    assert (tmp_path / "tilde_u_sweep_1.zip").read_bytes() == b"existing numbered report"
+    loaded = load_tilde_u_training_approx_report_data(tmp_path / "tilde_u_sweep_2.zip")
+    assert loaded["metadata"]["sweep_values"] == [12]
+
+
+def test_tilde_u_report_overwrite_reuses_requested_output(tmp_path):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    output_file = tmp_path / "tilde_u_sweep.zip"
+    output_file.write_bytes(b"existing report")
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12,),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=output_file,
+        overwrite=True,
+    )
+
+    run_tilde_u_training_approx_report(study)
+
+    loaded = load_tilde_u_training_approx_report_data(output_file)
+    assert loaded["metadata"]["sweep_values"] == [12]
+    assert not (tmp_path / "tilde_u_sweep_1.zip").exists()
+
+
+def test_tilde_u_report_saves_portable_parquet_zip(tmp_path):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    output_file = tmp_path / "tilde_u_sweep.zip"
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12, 16),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=output_file,
+    )
+
+    raw, summary, slopes = run_tilde_u_training_approx_report(study)
+
+    loaded = load_tilde_u_training_approx_report_data(output_file)
+    assert set(loaded) == {"raw", "metadata"}
+    np.testing.assert_allclose(
+        loaded["raw"]["leading_bias_sq"] + loaded["raw"]["leading_variance"],
+        raw["leading_mse_exact"],
+    )
+    assert loaded["metadata"]["sweep_values"] == [12, 16]
+
+
+def test_tilde_u_report_metadata_stores_explicit_povm_and_training_states(tmp_path):
+    povm = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
+    train_states = QuantumStateBatch.haar_pure_from_columns(
+        num_states=12,
+        dim=2,
+        rng=np.random.default_rng(456),
+    )
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(povm=povm, target=target, train_states=train_states)
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="N",
+        sweep_values=(20,),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=tmp_path / "explicit.zip",
+    )
+
+    run_tilde_u_training_approx_report(study)
+
+    loaded = load_tilde_u_training_approx_report_data(tmp_path / "explicit.zip")
+    assert loaded["metadata"]["data"]["povm"]["kind"] == "explicit"
+    assert loaded["metadata"]["data"]["povm"]["effects"]["shape"] == [8, 2, 2]
+    assert loaded["metadata"]["data"]["train_states"]["kind"] == "explicit"
+    assert loaded["metadata"]["data"]["train_states"]["states"]["shape"] == [12, 2, 2]
+    assert loaded["metadata"]["target"]["observable"]["operator"]["shape"] == [2, 2]
+
+
+def test_tilde_u_plot_selector_uses_short_keys():
+    assert workflows._tilde_u_training_approx_plots_from_keys("mse") == [
+        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"]
+    ]
+    assert workflows._tilde_u_training_approx_plots_from_keys(("mse", "correction")) == [
+        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"],
+        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["correction"],
+    ]
+    assert workflows._tilde_u_training_approx_plots_from_keys("all") == (
+        workflows.TILDE_U_TRAINING_APPROX_PLOTS
+    )
+
+    with pytest.raises(ValueError, match="Unknown tilde-U plot key"):
+        workflows._tilde_u_training_approx_plots_from_keys("not_a_plot")
 
 
 def test_actual_training_requires_noise_N_when_not_swept():

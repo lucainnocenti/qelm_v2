@@ -7,13 +7,12 @@ from qelm_rank import (
     QuantumStateBatch,
     clear_default_rng,
     generate_haar_random_isometry,
-    generate_haar_random_pure_states,
-    generate_haar_random_state_vectors,
+    generate_haar_random_kets,
+    generate_haar_random_pure_dms,
     generate_random_rank1_povm,
     haar_probability_moments_from_isometry,
     probability_matrix_from_povm_states,
     probability_vector_from_povm_state,
-    sample_finite_shot_probability_matrix,
     set_default_rng,
     validate_probability_matrix,
 )
@@ -75,34 +74,6 @@ def test_povm_effects_probability_vector_matches_probability_matrix_column():
 
     np.testing.assert_allclose(p, P[:, 0], atol=1e-12)
     np.testing.assert_allclose(np.sum(p), 1.0, atol=1e-12)
-
-
-def test_sample_finite_shot_probability_matrix_matches_manual_multinomial_columns():
-    P = np.array(
-        [
-            [0.2, 0.1, 0.4],
-            [0.3, 0.6, 0.4],
-            [0.5, 0.3, 0.2],
-        ]
-    )
-    N = 20
-
-    sampled = sample_finite_shot_probability_matrix(
-        P,
-        N=N,
-        rng=np.random.default_rng(123),
-    )
-    manual_rng = np.random.default_rng(123)
-    expected = np.column_stack(
-        [
-            manual_rng.multinomial(N, P[:, i]) / N
-            for i in range(P.shape[1])
-        ]
-    )
-
-    np.testing.assert_allclose(sampled, expected, atol=0.0)
-    np.testing.assert_allclose(sampled.sum(axis=0), 1.0, atol=1e-12)
-    assert np.all((N * sampled).round() == N * sampled)
 
 
 def test_four_outcome_qubit_povm_probability_matrix():
@@ -167,25 +138,25 @@ def test_rejects_state_with_wrong_trace():
         )
 
 
-def test_generate_haar_random_state_vectors_are_normalized():
+def test_generate_haar_random_kets_are_normalized():
     rng = np.random.default_rng(123)
 
-    vectors = generate_haar_random_state_vectors(num_states=7, dim=3, rng=rng)
+    vectors = generate_haar_random_kets(num_states=7, dim=3, rng=rng)
 
-    assert vectors.shape == (7, 3)
-    np.testing.assert_allclose(np.linalg.norm(vectors, axis=1), np.ones(7), atol=1e-12)
+    assert vectors.shape == (3, 7)
+    np.testing.assert_allclose(np.linalg.norm(vectors, axis=0), np.ones(7), atol=1e-12)
     assert np.iscomplexobj(vectors)
 
 
 def test_default_rng_reproducibly_feeds_calls_without_explicit_rng():
     try:
         set_default_rng(123)
-        first = generate_haar_random_state_vectors(num_states=3, dim=2)
-        second = generate_haar_random_state_vectors(num_states=3, dim=2)
+        first = generate_haar_random_kets(num_states=3, dim=2)
+        second = generate_haar_random_kets(num_states=3, dim=2)
 
         set_default_rng(123)
-        first_again = generate_haar_random_state_vectors(num_states=3, dim=2)
-        second_again = generate_haar_random_state_vectors(num_states=3, dim=2)
+        first_again = generate_haar_random_kets(num_states=3, dim=2)
+        second_again = generate_haar_random_kets(num_states=3, dim=2)
     finally:
         clear_default_rng()
 
@@ -197,7 +168,7 @@ def test_default_rng_reproducibly_feeds_calls_without_explicit_rng():
 def test_generate_haar_random_pure_states_are_density_matrices():
     rng = np.random.default_rng(123)
 
-    states = generate_haar_random_pure_states(num_states=5, dim=4, rng=rng)
+    states = generate_haar_random_pure_dms(num_states=5, dim=4, rng=rng)
 
     assert states.shape == (5, 4, 4)
     np.testing.assert_allclose(states, states.conj().transpose(0, 2, 1), atol=1e-12)
@@ -254,7 +225,7 @@ def test_haar_probability_moments_for_projective_qubit_measurement():
 def test_random_rank1_povm_and_haar_states_make_probability_matrix():
     rng = np.random.default_rng(123)
     effects = generate_random_rank1_povm(nout=5, dim=2, rng=rng)
-    states = generate_haar_random_pure_states(num_states=11, dim=2, rng=rng)
+    states = generate_haar_random_pure_dms(num_states=11, dim=2, rng=rng)
 
     P = probability_matrix_from_povm_states(effects, states)
 
@@ -276,11 +247,17 @@ def test_povm_effects_and_state_batch_make_probability_matrix():
     povm = POVMEffects.random_rank1(nout=5, dim=2, rng=rng)
     states = QuantumStateBatch.haar_pure(num_states=11, dim=2, rng=rng)
     P = povm.probability_matrix(states)
+    expected = probability_matrix_from_povm_states(
+        povm.effects,
+        states.states,
+        validate_inputs=False,
+    )
 
     assert povm.nout == 5
     assert povm.dim == 2
-    assert povm.effect_rows.shape == (5, 4)
-    assert states.state_rows.shape == (11, 4)
+    np.testing.assert_allclose(P, expected, atol=1e-12)
+    assert povm._effect_rows_cache is None
+    assert states._state_rows_cache is None
     validate_probability_matrix(P, atol=1e-10)
 
 
@@ -306,10 +283,10 @@ def test_qelm_quantum_dataset_training_dual_rows_match_composed_frame_formula():
         rcond=1e-12,
     )
 
-    frame = dataset.train_state_rows.T @ dataset.train_state_rows.conj()
+    frame = dataset._train_state_rows.T @ dataset._train_state_rows.conj()
     frame_pinv = np.linalg.pinv(frame, rcond=1e-12)
-    effect_frame = dataset.effect_rows.T @ dataset.effect_rows.conj()
-    povm_dual_rows = (np.linalg.pinv(effect_frame, rcond=1e-12) @ dataset.effect_rows.T).T
+    effect_frame = dataset._effect_rows.T @ dataset._effect_rows.conj()
+    povm_dual_rows = (np.linalg.pinv(effect_frame, rcond=1e-12) @ dataset._effect_rows.T).T
     expected = (frame_pinv @ povm_dual_rows.T).T
 
     np.testing.assert_allclose(dataset.training_dual_effect_rows, expected, atol=1e-12)

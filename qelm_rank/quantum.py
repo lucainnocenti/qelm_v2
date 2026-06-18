@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
@@ -91,32 +91,26 @@ def _state_like_to_density(state, *, dim: int, name: str = "state") -> np.ndarra
     raise ValueError(f"{name} must be a state vector or density matrix.")
 
 
-def _clean_probability_matrix_columns(P: np.ndarray, *, atol: float) -> np.ndarray:
-    P = np.asarray(P, dtype=float)
-    if P.ndim != 2:
-        raise ValueError("P must be a 2D array.")
-    if not np.all(np.isfinite(P)):
-        raise ValueError("P contains non-finite entries.")
-    if np.any(P < -atol):
-        raise ValueError("P has negative entries beyond tolerance.")
-
-    P = np.where((P < 0.0) & (P >= -atol), 0.0, P)
-    col_sums = P.sum(axis=0, keepdims=True)
-    if np.any(col_sums <= 0):
-        raise ValueError("Each column of P must have positive total probability mass.")
-    return P / col_sums
-
-
-def probability_matrix_from_operator_rows(
-    effect_rows: np.ndarray,
+def _operator_row_inner_products(
+    operator_rows: np.ndarray,
     state_rows: np.ndarray,
     *,
     clip: bool = True,
 ) -> np.ndarray:
-    # this computes the probability matrix P[a, i] = Tr(mu_a rho_i) from the effect rows and state rows
-    # by "rows" we mean that each effect mu_a is flattened into a row vector, and each state rho_i is flattened into a row vector, so the trace is just a dot product of the effect row with the state row.
-    # This allows us to compute the entire probability matrix as a single matrix multiplication.
-    probabilities = np.asarray(effect_rows, dtype=complex).conj() @ np.asarray(state_rows, dtype=complex).T
+    probabilities = np.asarray(operator_rows, dtype=complex).conj() @ np.asarray(state_rows, dtype=complex).T
+    probabilities = probabilities.real
+    if clip:
+        probabilities = np.maximum(probabilities, 0.0)
+    return probabilities
+
+
+def _operator_stack_probability_matrix(
+    effects: np.ndarray,
+    states: np.ndarray,
+    *,
+    clip: bool = False,
+) -> np.ndarray:
+    probabilities = np.einsum("ajk,ikj->ai", effects, states)
     probabilities = probabilities.real
     if clip:
         probabilities = np.maximum(probabilities, 0.0)
@@ -225,12 +219,11 @@ def probability_matrix_from_povm_states(
             raise ValueError(f"States do not all have trace 1. Max error: {max_err:.3e}")
 
     probabilities = np.einsum("ajk,ikj->ai", effects, rho)
-
     max_imag = np.max(np.abs(np.imag(probabilities)))
     if max_imag > atol:
         raise ValueError(f"Computed probabilities have non-negligible imaginary part: {max_imag:.3e}")
 
-    P = np.real(probabilities)
+    P = probabilities.real
     # P = np.where((P < 0.0) & (P >= -atol), 0.0, P)
 
     if validate_output:
@@ -239,37 +232,22 @@ def probability_matrix_from_povm_states(
     return P
 
 
-def sample_finite_shot_probability_matrix(
-    P: np.ndarray,
-    N: int,
-    rng: np.random.Generator | None = None,
-    *,
-    atol: float = 1e-12,
-) -> np.ndarray:
-    """
-    Sample empirical probabilities from exact column probabilities.
-
-    Returns P_hat[:, i] = Multinomial(N, P[:, i]) / N for each column i.
-    """
-    if int(N) != N or N <= 0:
-        raise ValueError("N must be a positive integer.")
-
-    rng = _rng_or_default(rng)
-    P = _clean_probability_matrix_columns(P, atol=atol)
-    nout, ntr = P.shape
-    P_hat = np.empty((nout, ntr), dtype=float)
-
-    for i in range(ntr):
-        P_hat[:, i] = rng.multinomial(int(N), P[:, i]) / int(N)
-
-    return P_hat
-
-
 def haar_moments_from_operator_rows(
     operator_rows: np.ndarray,
     dim: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    operators = np.asarray(operator_rows, dtype=complex).reshape(operator_rows.shape[0], dim, dim)
+    """
+    Compute the first and second Haar moments of a set of operators.
+
+    More precisely, if the operators are A_a, the first moment is
+    .. math::
+        \\mathbb{E}_{\\psi}[\\mathrm{Tr}(A_a \\rho_\\psi)] = \\frac{1}{d} \\mathrm{Tr}(A_a)
+    and the second moment is
+    .. math::
+        \\mathbb{E}_{\\psi}[\\mathrm{Tr}(A_a \\rho_\\psi) \\mathrm{Tr}(A_b \\rho_\\psi)] = \\frac{1}{d(d+1)} (\\mathrm{Tr}(A_a) \\mathrm{Tr}(A_b) + \\mathrm{Tr}(A_a A_b))
+    """
+    operators = np.asarray(operator_rows, dtype=complex).reshape(
+        operator_rows.shape[0], dim, dim)
     traces = np.trace(operators, axis1=1, axis2=2)
     trace_products = np.einsum("aij,bji->ab", operators, operators, optimize=True)
 
@@ -280,11 +258,11 @@ def haar_moments_from_operator_rows(
 
 def dual_rows_for_operator_frame(
     operator_rows: np.ndarray,
-    rcond: float,
+    rcond: float | None,
 ) -> np.ndarray:
     rows = np.asarray(operator_rows, dtype=complex)
     frame = rows.T @ rows.conj()
-    frame_pinv = np.linalg.pinv(frame, rcond=rcond)
+    frame_pinv = np.linalg.pinv(frame) if rcond is None else np.linalg.pinv(frame, rcond=rcond)
     return (frame_pinv @ rows.T).T
 
 
@@ -299,32 +277,17 @@ def _pure_state_vector_to_density(vector: np.ndarray, dim: int, name: str = "sta
     return np.outer(vector, vector.conj())
 
 
-def generate_haar_random_state_vectors(
+def generate_haar_random_state_vectors(**kwargs):
+    raise DeprecationWarning("generate_haar_random_state_vectors is deprecated; use generate_haar_random_kets and transpose instead.")
+
+
+def generate_haar_random_kets(
     num_states: int,
     dim: int,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
     """
-    Generate Haar random pure state vectors as rows.
-
-    This compatibility wrapper preserves the original public API. New code that
-    naturally works with column vectors can use
-    generate_haar_random_state_vector_columns instead.
-    """
-    return generate_haar_random_state_vector_columns(
-        num_states=num_states,
-        dim=dim,
-        rng=rng,
-    ).T
-
-
-def generate_haar_random_state_vector_columns(
-    num_states: int,
-    dim: int,
-    rng: np.random.Generator | None = None,
-) -> np.ndarray:
-    """
-    Generate Haar random pure state vectors as columns.
+    Generate Haar random pure state vectors (ie as kets).
 
     Returns an array with shape (dim, num_states).
     """
@@ -339,7 +302,7 @@ def generate_haar_random_state_vector_columns(
     return vectors
 
 
-def generate_haar_random_pure_states(
+def generate_haar_random_pure_dms(
     num_states: int,
     dim: int,
     rng: np.random.Generator | None = None,
@@ -349,7 +312,7 @@ def generate_haar_random_pure_states(
 
     Returns an array with shape (num_states, dim, dim).
     """
-    vectors = generate_haar_random_state_vector_columns(num_states=num_states, dim=dim, rng=rng)
+    vectors = generate_haar_random_kets(num_states=num_states, dim=dim, rng=rng)
     return np.einsum("ji,ki->ijk", vectors, vectors.conj())
 
 
@@ -379,34 +342,6 @@ def generate_haar_random_isometry(
     return q * phases
 
 
-def generate_haar_random_isometry_conjugate_phase(
-    nout: int,
-    dim: int,
-    rng: np.random.Generator | None = None,
-) -> np.ndarray:
-    """
-    Generate a Haar random isometry using the conjugate QR phase convention.
-
-    This convention is used by the Schur-correction scaling notebook. It has
-    the same distribution as generate_haar_random_isometry, but preserves that
-    notebook's seeded numerical output.
-    """
-    if dim <= 0:
-        raise ValueError("dim must be positive.")
-    if nout < dim:
-        raise ValueError("nout must be at least dim to generate an nout x dim isometry.")
-
-    rng = _rng_or_default(rng)
-    gaussian = (rng.normal(size=(nout, dim)) + 1j * rng.normal(size=(nout, dim))) / np.sqrt(2.0)
-    q, r = np.linalg.qr(gaussian)
-
-    diagonal = np.diag(r)
-    phases = np.ones_like(diagonal)
-    nonzero = np.abs(diagonal) > 0
-    phases[nonzero] = diagonal[nonzero] / np.abs(diagonal[nonzero])
-    return (q * phases.conj()[None, :])[:, :dim]
-
-
 def generate_random_rank1_povm(
     nout: int,
     dim: int,
@@ -419,14 +354,26 @@ def generate_random_rank1_povm(
         mu_a = |v_a><v_a|.
     These effects are generally unnormalized rank-1 positive semidefinite
     matrices and satisfy sum_a mu_a = I_dim.
+
+    Returns a complex array with shape (nout, dim, dim) containing the POVM effects.
     """
     isometry = generate_haar_random_isometry(nout=nout, dim=dim, rng=rng)
+    # I guess using conj on the first argument here is slightly different than the
+    # usual convention we use to define these POVMs, but the distribution of effects
+    # is the same, so it doesn't really matter.
     return np.einsum("ai,aj->aij", isometry.conj(), isometry)
 
 
 @dataclass(frozen=True)
 class QuantumStateBatch:
     states: np.ndarray
+    _state_rows_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _frame_pinv_cache: dict[float | None, np.ndarray] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         states = _as_operator_stack(self.states, "states")
@@ -507,7 +454,7 @@ class QuantumStateBatch:
         dim: int,
         rng: np.random.Generator | None = None,
     ) -> "QuantumStateBatch":
-        return cls(generate_haar_random_pure_states(num_states=num_states, dim=dim, rng=rng))
+        return cls(generate_haar_random_pure_dms(num_states=num_states, dim=dim, rng=rng))
 
     @classmethod
     def haar_pure_from_columns(
@@ -516,7 +463,7 @@ class QuantumStateBatch:
         dim: int,
         rng: np.random.Generator | None = None,
     ) -> "QuantumStateBatch":
-        vectors = generate_haar_random_state_vector_columns(
+        vectors = generate_haar_random_kets(
             num_states=num_states,
             dim=dim,
             rng=rng,
@@ -532,10 +479,22 @@ class QuantumStateBatch:
     def dim(self) -> int:
         return self.states.shape[1]
 
-    # this seems to be vectorizing the states by flattening them, is this correct?
     @property
-    def state_rows(self) -> np.ndarray:
-        return self.states.reshape(self.num_states, -1)
+    def _state_rows(self) -> np.ndarray:
+        if self._state_rows_cache is None:
+            object.__setattr__(self, "_state_rows_cache", self.states.reshape(self.num_states, -1))
+        return self._state_rows_cache
+
+    def _frame_pinv(self, rcond: float | None) -> np.ndarray:
+        """Canonical pseudoinverse of the frame generated by this state batch."""
+        if rcond not in self._frame_pinv_cache:
+            frame = self._state_rows.T @ self._state_rows.conj()
+            self._frame_pinv_cache[rcond] = (
+                np.linalg.pinv(frame)
+                if rcond is None
+                else np.linalg.pinv(frame, rcond=rcond)
+            )
+        return self._frame_pinv_cache[rcond]
 
 
 @dataclass(frozen=True)
@@ -544,6 +503,19 @@ class POVMEffects:
     label: str | None = None
     isometry: np.ndarray | None = None
     atol: float = 1e-10
+    _effect_rows_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _dual_effect_rows_cache: dict[float | None, np.ndarray] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _haar_probability_moments_cache: tuple[np.ndarray, np.ndarray] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         effects = np.asarray(self.effects, dtype=complex)
@@ -618,15 +590,9 @@ class POVMEffects:
         cls,
         nout: int,
         dim: int,
-        rng: np.random.Generator | None = None,
-        *,
-        conjugate_phase: bool = True,
+        rng: np.random.Generator | None = None
     ) -> "POVMEffects":
-        generator = (
-            generate_haar_random_isometry_conjugate_phase
-            if conjugate_phase
-            else generate_haar_random_isometry
-        )
+        generator = generate_haar_random_isometry
         isometry = generator(nout=nout, dim=dim, rng=rng)
         effects = np.einsum("ai,aj->aij", isometry.conj(), isometry)
         return cls(effects, label="random_isometry", isometry=isometry)
@@ -640,30 +606,25 @@ class POVMEffects:
         return self.effects.shape[1]
 
     @property
-    def effect_rows(self) -> np.ndarray:
-        return self.effects.reshape(self.nout, -1)
+    def _effect_rows(self) -> np.ndarray:
+        if self._effect_rows_cache is None:
+            object.__setattr__(self, "_effect_rows_cache", self.effects.reshape(self.nout, -1))
+        return self._effect_rows_cache
 
     def probability_matrix(
         self,
-        states: QuantumStateBatch | Sequence[np.ndarray] | np.ndarray,
-        *,
-        clip: bool = True,
-        normalize: bool = True,
+        states: QuantumStateBatch
     ) -> np.ndarray:
-        batch = states if isinstance(states, QuantumStateBatch) else QuantumStateBatch(states)
-        if batch.dim != self.dim:
+        """
+        Compute the probability matrix for the given states.
+        """
+        if states.dim != self.dim:
             raise ValueError("POVM effects and states must have the same dimension.")
-        P = probability_matrix_from_operator_rows(self.effect_rows, batch.state_rows, clip=clip)
-        if normalize:
-            P /= P.sum(axis=0, keepdims=True)
-        return P
+        return _operator_stack_probability_matrix(self.effects, states.states, clip=True)
 
     def probability_vector(
         self,
-        state: np.ndarray,
-        *,
-        clip: bool = True,
-        normalize: bool = True,
+        state: np.ndarray
     ) -> np.ndarray:
         p = probability_vector_from_povm_state(
             self.effects,
@@ -672,37 +633,28 @@ class POVMEffects:
             validate_output=False,
             atol=self.atol,
         )
-        if clip:
-            p = np.maximum(p, 0.0)
-        if normalize:
-            total = p.sum()
-            if total <= 0:
-                raise ValueError("Probability vector has non-positive total mass.")
-            p = p / total
         return p
 
-    def probability_matrix_from_rows(
-        self,
-        state_rows: np.ndarray,
-        *,
-        clip: bool = True,
-        normalize: bool = True,
-    ) -> np.ndarray:
-        # this just computes the probability matrix <mu,rho> of shape (nout, ntr), using the 
-        # vectorized descriptions of effects and states
-        P = probability_matrix_from_operator_rows(self.effect_rows, state_rows, clip=clip)
-        # in theory this normalize shouldn't do nothing b/c things are already normalized...
-        if normalize:
-            P /= P.sum(axis=0, keepdims=True)
-        return P
-
     def haar_probability_moments(self) -> tuple[np.ndarray, np.ndarray]:
-        if self.isometry is not None:
-            return haar_probability_moments_from_isometry(self.isometry)
-        return haar_moments_from_operator_rows(self.effect_rows, dim=self.dim)
+        if self._haar_probability_moments_cache is None:
+            if self.isometry is not None:
+                moments = haar_probability_moments_from_isometry(self.isometry)
+            else:
+                moments = haar_moments_from_operator_rows(self._effect_rows, dim=self.dim)
+            object.__setattr__(self, "_haar_probability_moments_cache", moments)
+        return self._haar_probability_moments_cache
 
-    def effect_frame_dual_rows(self, rcond: float) -> np.ndarray:
-        return dual_rows_for_operator_frame(self.effect_rows, rcond=rcond)
+    def dual_effect_rows(self, rcond: float | None) -> np.ndarray:
+        """Canonical dual rows of the POVM effect frame."""
+        if rcond not in self._dual_effect_rows_cache:
+            self._dual_effect_rows_cache[rcond] = dual_rows_for_operator_frame(
+                self._effect_rows,
+                rcond=rcond,
+            )
+        return self._dual_effect_rows_cache[rcond]
+
+    def effect_frame_dual_rows(self, rcond: float | None) -> np.ndarray:
+        return self.dual_effect_rows(rcond=rcond)
 
 
 @dataclass(frozen=True)
@@ -780,12 +732,12 @@ class QELMQuantumDataset:
         )
 
     @property
-    def effect_rows(self) -> np.ndarray:
-        return self.povm.effect_rows
+    def _effect_rows(self) -> np.ndarray:
+        return self.povm._effect_rows
 
     @property
-    def train_state_rows(self) -> np.ndarray:
-        return self.train_states.state_rows
+    def _train_state_rows(self) -> np.ndarray:
+        return self.train_states._state_rows
 
     @property
     def dual_effect_rows(self) -> np.ndarray:
@@ -801,14 +753,12 @@ class QELMQuantumDataset:
         we can dualize the POVM-dual rows by the training-state frame and then
         pair the resulting rows with ordinary state rows.
         """
-        frame = self.train_state_rows.T @ self.train_state_rows.conj()
-        frame_pinv = np.linalg.pinv(frame, rcond=self.rcond)
-        return (frame_pinv @ self.povm_dual_effect_rows.T).T
+        return (self.train_states._frame_pinv(self.rcond) @ self.povm_dual_effect_rows.T).T
 
     @property
     def povm_dual_effect_rows(self) -> np.ndarray:
         """Compute the dual effect rows for the effects, via the POVM effects themselves."""
-        return self.povm.effect_frame_dual_rows(rcond=self.rcond)
+        return self.povm.dual_effect_rows(rcond=self.rcond)
 
     @property
     def P_train(self) -> np.ndarray:
@@ -823,9 +773,9 @@ class QELMQuantumDataset:
         training-state-frame dual states.
         """
         # this computes the probability matrix but using the training dual effect rows instead of the actual POVM effects
-        return probability_matrix_from_operator_rows(
+        return _operator_row_inner_products(
             self.training_dual_effect_rows,
-            self.train_state_rows,
+            self._train_state_rows,
             clip=False,
         )
 
@@ -839,9 +789,9 @@ class QELMQuantumDataset:
     def dual_P_test(self) -> np.ndarray | None:
         if self.test_states is None:
             return None
-        return probability_matrix_from_operator_rows(
+        return _operator_row_inner_products(
             self.training_dual_effect_rows,
-            self.test_states.state_rows,
+            self.test_states._state_rows,
             clip=False,
         )
 
@@ -880,7 +830,7 @@ def probability_matrix_from_isometry_state_vectors(
         raise ValueError("isometry and state vectors have incompatible dimensions.")
 
     P = np.abs(V @ psi) ** 2
-    P = np.maximum(P.real, 0.0)
+    P = np.maximum(P, 0.0)
     P /= P.sum(axis=0, keepdims=True)
     return P
 

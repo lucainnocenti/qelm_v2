@@ -46,7 +46,7 @@ def _tilde_u_study(
     sweep_values=None,
 ) -> TildeUTrainingApproxStudySpec:
     if train_states is None:
-        train_states = {"kind": "haar", "num_states": ntr}
+        train_states = {"kind": "haar_pure", "num_states": ntr}
     base = QELMTrainingSpec(
         data=QELMDataSpec(
             d=d,
@@ -115,7 +115,7 @@ def test_run_tilde_u_training_approx_experiment_default_haar_test_state_shapes()
     )
 
     assert len(raw) == 2
-    assert set(raw["test_state"]) == {"haar"}
+    assert set(raw["test_state"]) == {"haar_pure_average"}
     assert set(raw["test_average"]) == {"exact_haar_second_moment"}
     assert set(raw["num_test_points"]) == {0}
     assert len(summary) == 1
@@ -323,9 +323,9 @@ def test_leading_bias_uses_povm_dual_then_training_state_dual():
         rcond=1e-12,
     )
     P = dataset.P_train
-    state_rows = dataset.train_state_rows
-    effect_rows = dataset.effect_rows
-    test_state_rows = dataset.test_states.state_rows
+    state_rows = dataset._train_state_rows
+    effect_rows = dataset._effect_rows
+    test_state_rows = dataset.test_states._state_rows
 
     effect_frame = effect_rows.T @ effect_rows.conj()
     povm_dual_rows = (np.linalg.pinv(effect_frame, rcond=1e-12) @ effect_rows.T).T
@@ -436,11 +436,11 @@ def test_run_tilde_u_training_approx_experiment_haar_target_average_shapes():
     raw, summary = _run_tilde_u(
         repetitions=2,
         actual_noise_trials=2,
-        target_observable="haar_pure_state_average",
+        target_observable="haar_pure_average",
     )
 
     assert len(raw) == 2
-    assert set(raw["target_kind"]) == {"haar_pure_state"}
+    assert set(raw["target_kind"]) == {"haar_pure"}
     assert set(raw["target_average"]) == {"exact_haar_second_moment"}
     assert len(summary) == 1
     assert "target_kind" in summary.columns

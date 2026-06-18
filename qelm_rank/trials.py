@@ -1,3 +1,16 @@
+"""Monte Carlo diagnostics for a fixed low-rank probability matrix.
+
+The routines here start after a probability matrix ``P`` has already been
+constructed.  They do not build POVMs, sample quantum states, or fit QELM
+models.  Instead, they take deterministic SVD/covariance blocks from
+``qelm_rank.blocks``, sample scaled shot-noise matrices ``Xi`` from
+``qelm_rank.noise``, project that noise into the block basis, and summarize the
+Schur-complement quantities used in the rank proof.
+
+For actual QELM training simulations, use ``qelm_rank.training``.  That module
+works with noisy design matrices ``P_hat`` rather than directly with projected
+``Xi`` blocks.
+"""
 
 from typing import Dict
 
@@ -6,13 +19,12 @@ import pandas as pd
 
 from .blocks import PBlocks
 from .linalg import empirical_quantiles, opnorm, safe_inv
-from .noise import generate_gaussian_Xi, generate_multinomial_Xi, project_noise_blocks
+from .noise import project_noise_blocks, shot_noise_matrix
 from .quantum import get_rng
 
 
 def theoretical_predictors(blocks: PBlocks) -> Dict[str, float]:
-    """
-    Dimensionless predictors suggested by the proof, without universal constants.
+    """Compute dimensionless proof predictors for one block decomposition.
 
     delta_shape = sqrt(M/p)+M/p, M=r+q+log(p).
     """
@@ -67,8 +79,12 @@ def one_trial_diagnostics(
     noise_model: str = "multinomial",
     inv_rcond: float = 1e-12,
 ) -> Dict[str, float]:
-    """
-    Run one shot-noise trial and compute diagnostics.
+    """Run one scaled-noise trial and compute block diagnostics.
+
+    ``blocks`` contains the deterministic decomposition of the exact
+    probability matrix ``P``.  This function samples a scaled fluctuation
+    matrix ``Xi = sqrt(N) * (P_hat - P)``, projects it into the SVD block basis,
+    and records operator-norm diagnostics for the empirical Schur terms.
 
     noise_model:
         "multinomial" = exact finite-N multinomial normalized by sqrt(N)
@@ -78,12 +94,7 @@ def one_trial_diagnostics(
     P = blocks.P
     p_dim = blocks.p_dim
 
-    if noise_model == "multinomial":
-        Xi = generate_multinomial_Xi(P, N=N, rng=rng)
-    elif noise_model == "gaussian":
-        Xi = generate_gaussian_Xi(P, rng=rng)
-    else:
-        raise ValueError("noise_model must be 'multinomial' or 'gaussian'.")
+    Xi = shot_noise_matrix(P, rng=rng, Nshots=N, noise=noise_model)
 
     noise_blocks = project_noise_blocks(Xi, blocks)
     Xi12 = noise_blocks["Xi12"]
@@ -152,9 +163,7 @@ def run_trials(
     inv_rcond: float = 1e-12,
     progress: bool = True,
 ) -> pd.DataFrame:
-    """
-    Run many trials for a fixed P.
-    """
+    """Run repeated ``one_trial_diagnostics`` calls for a fixed block object."""
     rng = get_rng(seed)
     rows = []
 
@@ -175,9 +184,7 @@ def run_trials(
     return pd.DataFrame(rows)
 
 def summarize_trials(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Summarize trial diagnostics by dimension tuple and noise model.
-    """
+    """Summarize trial diagnostics by dimensions, shot count, and noise model."""
     group_cols = ["r", "q", "p", "nout", "ntr", "N", "noise_model"]
 
     metric_cols = [
