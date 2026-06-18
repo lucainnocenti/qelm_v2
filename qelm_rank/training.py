@@ -24,7 +24,7 @@ from .blocks import schur_covariance_blocks, svd_probability_blocks
 from .linalg import opnorm, psd_solve
 from .noise import noisy_probability_matrix
 from .quantum import (
-    POVMEffects,
+    POVM,
     QELMQuantumDataset,
     QuantumStateBatch,
     _operator_row_inner_products,
@@ -77,7 +77,7 @@ def _reject_alias_keys(mapping: dict, aliases: set[str], *, context: str) -> Non
 
 
 def _infer_explicit_povm_nout(povm: object) -> int | None:
-    if isinstance(povm, POVMEffects):
+    if isinstance(povm, POVM):
         return povm.nout
     if povm is None or isinstance(povm, str):
         return None
@@ -192,7 +192,7 @@ class QELMTrainingContext:
     live on their owning quantum objects. This context owns only quantities
     that combine those objects, such as training/test probability matrices.
     """
-    povm: POVMEffects
+    povm: POVM
     train_states: QuantumStateBatch
     test_states: QuantumStateBatch | None = None
     rcond: float | None = None
@@ -205,8 +205,8 @@ class QELMTrainingContext:
     _dual_P_test_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.povm, POVMEffects):
-            raise TypeError("povm must be a POVMEffects object.")
+        if not isinstance(self.povm, POVM):
+            raise TypeError("povm must be a POVM object.")
         if not isinstance(self.train_states, QuantumStateBatch):
             raise TypeError("train_states must be a QuantumStateBatch.")
         if self.train_states.dim != self.povm.dim:
@@ -818,7 +818,7 @@ def _povm_kind_from_spec(povm) -> str:
             return EXPLICIT_POVM_KIND
         raise ValueError(f"Unknown POVM spec kind: {kind!r}.")
 
-    if isinstance(povm, POVMEffects):
+    if isinstance(povm, POVM):
         return EXPLICIT_POVM_KIND
 
     return EXPLICIT_POVM_KIND
@@ -828,14 +828,14 @@ def _povm_shape_from_spec(povm) -> tuple[int | None, int | None]:
     kind = _povm_kind_from_spec(povm)
 
     if kind == EXPLICIT_POVM_KIND:
-        if isinstance(povm, POVMEffects):
+        if isinstance(povm, POVM):
             return povm.nout, povm.dim
         effects = povm
         if isinstance(povm, dict):
             effects = povm.get("effects")
             if effects is None:
                 raise ValueError("Explicit POVM dictionary specs must include 'effects'.")
-        povm_effects = POVMEffects.from_effects(effects)
+        povm_effects = POVM.from_effects(effects)
         return povm_effects.nout, povm_effects.dim
 
     if isinstance(povm, dict):
@@ -875,13 +875,13 @@ def _validate_random_povm_spec_for_config(
         )
 
 
-def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> POVMEffects:
+def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> POVM:
     kind = _povm_kind_from_spec(povm)
     if kind == RANDOM_POVM_KIND:
         _validate_random_povm_spec_for_config(povm, nout=nout, dim=dim)
-        return POVMEffects.random_rank1(nout=nout, dim=dim, rng=rng)
+        return POVM.random_rank1(nout=nout, dim=dim, rng=rng)
 
-    if isinstance(povm, POVMEffects):
+    if isinstance(povm, POVM):
         if povm.nout != int(nout):
             raise ValueError(f"Explicit POVM has nout={povm.nout}, but the config has nout={nout}.")
         if povm.dim != int(dim):
@@ -891,7 +891,7 @@ def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> P
     effects = povm
     if isinstance(povm, dict):
         effects = povm.get("effects")
-    return POVMEffects.from_effects(effects, dim=dim, nout=nout)
+    return POVM.from_effects(effects, dim=dim, nout=nout)
 
 
 def _context_from_dataset(dataset: QELMQuantumDataset) -> QELMTrainingContext:

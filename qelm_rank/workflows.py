@@ -44,7 +44,7 @@ from .plotting import (
     plot_summary_series,
 )
 from .quantum import (
-    POVMEffects,
+    POVM,
     QuantumStateBatch,
     get_rng,
 )
@@ -346,7 +346,7 @@ def run_random_quantum_scaling_sweep(
                             f"rep={repetition + 1}/{repetitions}"
                         )
 
-                    povm = POVMEffects.random_rank1(nout=nout, dim=d, rng=rng)
+                    povm = POVM.random_rank1(nout=nout, dim=d, rng=rng)
                     states = QuantumStateBatch.haar_pure(num_states=ntr, dim=d, rng=rng)
                     P = povm.probability_matrix(states)
                     blocks = deterministic_blocks_from_P(P, r=r)
@@ -565,7 +565,7 @@ def one_schur_complement_approx_trial(
     """
     rng = get_rng(rng)
     r = d * d if rank is None else int(rank)
-    povm = POVMEffects.random_isometry(nout=nout, dim=d, rng=rng)
+    povm = POVM.random_isometry(nout=nout, dim=d, rng=rng)
     states = QuantumStateBatch.haar_pure_from_columns(num_states=ntr, dim=d, rng=rng)
     P = povm.probability_matrix(states)
 
@@ -1534,7 +1534,7 @@ def one_schur_correction_trial(
     if ntr <= r:
         raise ValueError(f"Need ntr > r. Got ntr={ntr}, r={r}.")
 
-    povm = POVMEffects.random_isometry(nout=nout, dim=d, rng=rng)
+    povm = POVM.random_isometry(nout=nout, dim=d, rng=rng)
     states = QuantumStateBatch.haar_pure_from_columns(num_states=ntr, dim=d, rng=rng)
     P = povm.probability_matrix(states)
 

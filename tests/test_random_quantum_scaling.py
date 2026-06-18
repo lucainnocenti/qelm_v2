@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from qelm_rank import (
-    POVMEffects,
+    POVM,
     QuantumStateBatch,
     fit_random_quantum_scaling_laws,
     run_random_quantum_scaling_sweep,
@@ -13,7 +13,7 @@ from qelm_rank import (
 def test_random_rank1_povm_and_state_batch_probability_matrix_shape_and_columns():
     rng = np.random.default_rng(123)
 
-    povm = POVMEffects.random_rank1(nout=6, dim=2, rng=rng)
+    povm = POVM.random_rank1(nout=6, dim=2, rng=rng)
     states = QuantumStateBatch.haar_pure(num_states=9, dim=2, rng=rng)
     P = povm.probability_matrix(states)
 

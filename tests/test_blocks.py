@@ -5,7 +5,7 @@ from qelm_rank.blocks import (
     schur_covariance_blocks,
     svd_probability_blocks,
 )
-from qelm_rank.quantum import POVMEffects, QuantumStateBatch
+from qelm_rank.quantum import POVM, QuantumStateBatch
 
 
 def make_toy_rank_r_probability_matrix(nout, ntr, r, rng):
@@ -122,7 +122,7 @@ def test_svd_probability_blocks_decompose_toy_rank_r_probability_matrix():
 
 def test_svd_probability_blocks_decompose_state_povm_probability_matrix():
     rng = np.random.default_rng(123)
-    povm = POVMEffects.random_isometry(nout=32, dim=2, rng=rng)
+    povm = POVM.random_isometry(nout=32, dim=2, rng=rng)
     states = QuantumStateBatch.haar_pure_from_columns(num_states=16, dim=2, rng=rng)
     P = povm.probability_matrix(states)
 

@@ -11,7 +11,7 @@ from qelm_rank import (
     QELMTestRequest,
     QELMRun,
     QELMTrainingSpec,
-    POVMEffects,
+    POVM,
     QuantumStateBatch,
     TildeUTrainingApproxStudySpec,
     analyze_qelm_training,
@@ -149,7 +149,7 @@ def test_explicit_array_povm_allows_omitting_nout():
 
 def test_explicit_povm_object_allows_omitting_nout():
     effects = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
-    povm = POVMEffects.from_effects(effects, dim=2)
+    povm = POVM.from_effects(effects, dim=2)
     spec = QELMTrainingSpec(
         data=QELMDataSpec(
             d=2,
@@ -178,7 +178,7 @@ def test_fixed_explicit_training_states_are_used_in_training_context():
 
     context = make_qelm_training_context(spec, rng=np.random.default_rng(789))
 
-    expected = POVMEffects.from_effects(povm, dim=2, nout=8).probability_matrix(train_states)
+    expected = POVM.from_effects(povm, dim=2, nout=8).probability_matrix(train_states)
     np.testing.assert_allclose(context.P_train, expected, atol=1e-12)
     assert isinstance(context.train_states, QuantumStateBatch)
     np.testing.assert_allclose(context.train_states.states, train_states.states)

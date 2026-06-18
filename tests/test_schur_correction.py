@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from qelm_rank import (
-    POVMEffects,
+    POVM,
     QELMDataSpec,
     QELMNoiseSpec,
     QELMQuantumDataset,
@@ -85,7 +85,7 @@ def _run_tilde_u(**kwargs):
 def test_random_isometry_povm_probability_matrix_is_column_stochastic():
     rng = np.random.default_rng(123)
 
-    povm = POVMEffects.random_isometry(nout=8, dim=2, rng=rng)
+    povm = POVM.random_isometry(nout=8, dim=2, rng=rng)
     states = QuantumStateBatch.haar_pure_from_columns(num_states=20, dim=2, rng=rng)
     P = povm.probability_matrix(states)
 
@@ -96,7 +96,7 @@ def test_random_isometry_povm_probability_matrix_is_column_stochastic():
 def test_random_isometry_train_test_probability_matrices_share_outcomes():
     rng = np.random.default_rng(123)
 
-    povm = POVMEffects.random_isometry(nout=8, dim=2, rng=rng)
+    povm = POVM.random_isometry(nout=8, dim=2, rng=rng)
     train_states = QuantumStateBatch.haar_pure_from_columns(num_states=20, dim=2, rng=rng)
     test_states = QuantumStateBatch.haar_pure_from_columns(num_states=5, dim=2, rng=rng)
     P_train = povm.probability_matrix(train_states)

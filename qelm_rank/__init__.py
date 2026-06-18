@@ -47,7 +47,7 @@ from .plotting import (
     scatter_loglog,
 )
 from .quantum import (
-    POVMEffects,
+    POVM,
     QELMQuantumDataset,
     QuantumStateBatch,
     clear_default_rng,
@@ -59,7 +59,6 @@ from .quantum import (
     get_rng,
     haar_probability_moments_from_isometry,
     probability_vector_from_povm_state,
-    probability_matrix_from_isometry_state_vectors,
     probability_matrix_from_povm_states,
     set_default_rng,
 )
@@ -119,7 +118,7 @@ from .workflows import (
 
 __all__ = [
     "PBlocks",
-    "POVMEffects",
+    "POVM",
     "QELMTrainingResults",
     "QELMDataSpec",
     "QELMLeadingErrorResult",
@@ -187,7 +186,6 @@ __all__ = [
     "plot_random_quantum_scaling",
     "plot_summary_series",
     "plot_sweep_diagnostics",
-    "probability_matrix_from_isometry_state_vectors",
     "probability_matrix_from_povm_states",
     "probability_vector_from_povm_state",
     "project_noise_blocks",

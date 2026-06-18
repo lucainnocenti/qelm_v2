@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from qelm_rank import (
-    POVMEffects,
+    POVM,
     QELMQuantumDataset,
     QuantumStateBatch,
     clear_default_rng,
@@ -66,7 +66,7 @@ def test_probability_vector_from_povm_state_accepts_vector_and_density_matrix():
 
 def test_povm_effects_probability_vector_matches_probability_matrix_column():
     rng = np.random.default_rng(123)
-    povm = POVMEffects.random_isometry(nout=5, dim=2, rng=rng)
+    povm = POVM.random_isometry(nout=5, dim=2, rng=rng)
     state = density([1.0, 1.0j])
 
     p = povm.probability_vector(state)
@@ -238,13 +238,13 @@ def test_povm_effects_reject_invalid_completion():
     one = density([0, 1])
 
     with pytest.raises(ValueError, match="sum to identity"):
-        POVMEffects.from_effects(np.stack([zero, 0.5 * one]))
+        POVM.from_effects(np.stack([zero, 0.5 * one]))
 
 
 def test_povm_effects_and_state_batch_make_probability_matrix():
     rng = np.random.default_rng(123)
 
-    povm = POVMEffects.random_rank1(nout=5, dim=2, rng=rng)
+    povm = POVM.random_rank1(nout=5, dim=2, rng=rng)
     states = QuantumStateBatch.haar_pure(num_states=11, dim=2, rng=rng)
     P = povm.probability_matrix(states)
     expected = probability_matrix_from_povm_states(
@@ -264,12 +264,31 @@ def test_povm_effects_and_state_batch_make_probability_matrix():
 def test_povm_effects_haar_moments_match_isometry_formula():
     rng = np.random.default_rng(123)
 
-    povm = POVMEffects.random_isometry(nout=6, dim=3, rng=rng)
+    povm = POVM.random_isometry(nout=6, dim=3, rng=rng)
     mean, second = povm.haar_probability_moments()
     expected_mean, expected_second = haar_probability_moments_from_isometry(povm.isometry)
 
     np.testing.assert_allclose(mean, expected_mean, atol=1e-12)
     np.testing.assert_allclose(second, expected_second, atol=1e-12)
+    assert povm._effect_rows_cache is None
+
+
+def test_povm_haar_moments_use_effects_not_optional_isometry():
+    rng = np.random.default_rng(123)
+    effect_isometry = generate_haar_random_isometry(nout=6, dim=3, rng=rng)
+    stale_isometry = generate_haar_random_isometry(nout=6, dim=3, rng=rng)
+    effects = np.einsum("ai,aj->aij", effect_isometry.conj(), effect_isometry)
+    povm = POVM(effects, isometry=stale_isometry)
+
+    mean, second = povm.haar_probability_moments()
+    expected_mean, expected_second = haar_probability_moments_from_isometry(effect_isometry)
+    stale_mean, stale_second = haar_probability_moments_from_isometry(stale_isometry)
+
+    np.testing.assert_allclose(mean, expected_mean, atol=1e-12)
+    np.testing.assert_allclose(second, expected_second, atol=1e-12)
+    assert not np.allclose(mean, stale_mean, atol=1e-12)
+    assert not np.allclose(second, stale_second, atol=1e-12)
+    assert povm._effect_rows_cache is None
 
 
 def test_qelm_quantum_dataset_training_dual_rows_match_composed_frame_formula():

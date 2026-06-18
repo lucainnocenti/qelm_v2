@@ -232,9 +232,8 @@ def probability_matrix_from_povm_states(
     return P
 
 
-def haar_moments_from_operator_rows(
-    operator_rows: np.ndarray,
-    dim: int,
+def haar_moments_from_operators(
+    operators: Sequence[np.ndarray] | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Compute the first and second Haar moments of a set of operators.
@@ -246,14 +245,32 @@ def haar_moments_from_operator_rows(
     .. math::
         \\mathbb{E}_{\\psi}[\\mathrm{Tr}(A_a \\rho_\\psi) \\mathrm{Tr}(A_b \\rho_\\psi)] = \\frac{1}{d(d+1)} (\\mathrm{Tr}(A_a) \\mathrm{Tr}(A_b) + \\mathrm{Tr}(A_a A_b))
     """
-    operators = np.asarray(operator_rows, dtype=complex).reshape(
-        operator_rows.shape[0], dim, dim)
+    operators = _as_operator_stack(operators, "operators")
+    dim = operators.shape[1]
     traces = np.trace(operators, axis1=1, axis2=2)
     trace_products = np.einsum("aij,bji->ab", operators, operators, optimize=True)
 
     mean = traces / dim
     second = (np.outer(traces, traces) + trace_products) / (dim * (dim + 1))
     return mean.real, second.real
+
+
+def haar_moments_from_operator_rows(
+    operator_rows: np.ndarray,
+    dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Adapter for Haar moments of vectorized operator rows."""
+    rows = np.asarray(operator_rows, dtype=complex)
+    dim = int(dim)
+    if rows.ndim != 2:
+        raise ValueError("operator_rows must have shape (n, d*d).")
+    if rows.shape[0] == 0 or dim <= 0:
+        raise ValueError("operator_rows and dim must have positive shape.")
+    if rows.shape[1] != dim * dim:
+        raise ValueError(
+            f"operator_rows has width {rows.shape[1]}, but dim={dim} requires {dim * dim}."
+        )
+    return haar_moments_from_operators(rows.reshape(rows.shape[0], dim, dim))
 
 
 def dual_rows_for_operator_frame(
@@ -498,7 +515,7 @@ class QuantumStateBatch:
 
 
 @dataclass(frozen=True)
-class POVMEffects:
+class POVM:
     effects: np.ndarray
     label: str | None = None
     isometry: np.ndarray | None = None
@@ -563,7 +580,7 @@ class POVMEffects:
         nout: int | None = None,
         label: str | None = None,
         atol: float = 1e-10,
-    ) -> "POVMEffects":
+    ) -> "POVM":
         povm = cls(np.asarray(effects, dtype=complex), label=label, atol=atol)
         if nout is not None and povm.nout != int(nout):
             raise ValueError(
@@ -581,7 +598,7 @@ class POVMEffects:
         nout: int,
         dim: int,
         rng: np.random.Generator | None = None,
-    ) -> "POVMEffects":
+    ) -> "POVM":
         effects = generate_random_rank1_povm(nout=nout, dim=dim, rng=rng)
         return cls(effects, label="random_rank1")
 
@@ -591,7 +608,7 @@ class POVMEffects:
         nout: int,
         dim: int,
         rng: np.random.Generator | None = None
-    ) -> "POVMEffects":
+    ) -> "POVM":
         generator = generate_haar_random_isometry
         isometry = generator(nout=nout, dim=dim, rng=rng)
         effects = np.einsum("ai,aj->aij", isometry.conj(), isometry)
@@ -637,10 +654,7 @@ class POVMEffects:
 
     def haar_probability_moments(self) -> tuple[np.ndarray, np.ndarray]:
         if self._haar_probability_moments_cache is None:
-            if self.isometry is not None:
-                moments = haar_probability_moments_from_isometry(self.isometry)
-            else:
-                moments = haar_moments_from_operator_rows(self._effect_rows, dim=self.dim)
+            moments = haar_moments_from_operators(self.effects)
             object.__setattr__(self, "_haar_probability_moments_cache", moments)
         return self._haar_probability_moments_cache
 
@@ -659,14 +673,14 @@ class POVMEffects:
 
 @dataclass(frozen=True)
 class QELMQuantumDataset:
-    povm: POVMEffects
+    povm: POVM
     train_states: QuantumStateBatch
     test_states: QuantumStateBatch | None = None
     rcond: float | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.povm, POVMEffects):
-            raise TypeError("povm must be a POVMEffects object.")
+        if not isinstance(self.povm, POVM):
+            raise TypeError("povm must be a POVM object.")
         if not isinstance(self.train_states, QuantumStateBatch):
             raise TypeError("train_states must be a QuantumStateBatch.")
         if self.train_states.dim != self.povm.dim:
@@ -686,7 +700,7 @@ class QELMQuantumDataset:
     @classmethod
     def from_povm(
         cls,
-        povm: POVMEffects,
+        povm: POVM,
         *,
         train_states: QuantumStateBatch,
         rcond: float | None = None,
@@ -709,7 +723,7 @@ class QELMQuantumDataset:
         ntest: int | None = None,
     ) -> "QELMQuantumDataset":
         rng = get_rng(rng)
-        povm = POVMEffects.random_isometry(nout=nout, dim=dim, rng=rng)
+        povm = POVM.random_isometry(nout=nout, dim=dim, rng=rng)
         train_states = QuantumStateBatch.haar_pure_from_columns(
             num_states=ntr,
             dim=dim,
@@ -804,42 +818,14 @@ class QELMQuantumDataset:
             dim=self.povm.dim,
         )
 
-
-def probability_matrix_from_isometry_state_vectors(
-    isometry: np.ndarray,
-    state_vectors: np.ndarray,
-) -> np.ndarray:
-    """
-    Compute P[a, i] = |(V psi_i)[a]|^2 from an isometry and state columns.
-
-    Parameters
-    ----------
-    isometry:
-        Array with shape (nout, dim).
-    state_vectors:
-        Array with shape (dim, ntr), whose columns are state vectors.
-    """
-    V = np.asarray(isometry, dtype=complex)
-    psi = np.asarray(state_vectors, dtype=complex)
-
-    if V.ndim != 2:
-        raise ValueError("isometry must be a 2D array.")
-    if psi.ndim != 2:
-        raise ValueError("state_vectors must be a 2D array.")
-    if V.shape[1] != psi.shape[0]:
-        raise ValueError("isometry and state vectors have incompatible dimensions.")
-
-    P = np.abs(V @ psi) ** 2
-    P = np.maximum(P, 0.0)
-    P /= P.sum(axis=0, keepdims=True)
-    return P
-
-
 def haar_probability_moments_from_isometry(
     isometry: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Exact first and second moments of POVM probabilities over Haar pure states.
+
+    The only reason this exists is to provide a possibly more efficient implementation
+    in the special case of rank-1 POVMs generated from an isometry V.
 
     For effects mu_a = |v_a><v_a| from the rows of an isometry V,
         E[p_a] = Tr(mu_a) / d
