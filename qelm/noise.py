@@ -3,7 +3,7 @@
 This module distinguishes two related objects:
 
 * ``Xi`` is the scaled fluctuation, ``Xi = sqrt(N) * (P_hat - P)``.  The
-  block-diagnostic code in :mod:`qelm_rank.trials` projects ``Xi`` into SVD
+  block-diagnostic code in :mod:`qelm.trials` projects ``Xi`` into SVD
   blocks and studies its Schur-complement quantities.
 * ``P_hat`` is the noisy empirical probability matrix used as a design matrix
   in actual QELM least-squares training.  Use ``noisy_probability_matrix`` for

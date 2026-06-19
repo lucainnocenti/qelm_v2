@@ -1,8 +1,8 @@
 """Notebook-oriented workflows that compose the lower-level QELM modules.
 
 This module is intentionally orchestration-heavy.  It builds parameter grids,
-constructs toy or quantum probability matrices, calls ``qelm_rank.trials`` for
-fixed-``P`` shot-noise diagnostics, and calls ``qelm_rank.training`` for actual
+constructs toy or quantum probability matrices, calls ``qelm.trials`` for
+fixed-``P`` shot-noise diagnostics, and calls ``qelm.training`` for actual
 QELM training and tilde-U approximation studies.  The numerical primitives live
 in ``blocks.py``, ``noise.py``, ``quantum.py``, and ``training.py``; functions
 here mainly package those pieces into repeatable experiments and summary

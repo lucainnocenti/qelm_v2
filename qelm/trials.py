@@ -3,11 +3,11 @@
 The routines here start after a probability matrix ``P`` has already been
 constructed.  They do not build POVMs, sample quantum states, or fit QELM
 models.  Instead, they take deterministic SVD/covariance blocks from
-``qelm_rank.blocks``, sample scaled shot-noise matrices ``Xi`` from
-``qelm_rank.noise``, project that noise into the block basis, and summarize the
+``qelm.blocks``, sample scaled shot-noise matrices ``Xi`` from
+``qelm.noise``, project that noise into the block basis, and summarize the
 Schur-complement quantities used in the rank proof.
 
-For actual QELM training simulations, use ``qelm_rank.training``.  That module
+For actual QELM training simulations, use ``qelm.training``.  That module
 works with noisy design matrices ``P_hat`` rather than directly with projected
 ``Xi`` blocks.
 """

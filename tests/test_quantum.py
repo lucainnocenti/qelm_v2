@@ -165,7 +165,7 @@ def test_default_rng_reproducibly_feeds_calls_without_explicit_rng():
     assert not np.allclose(first, second)
 
 
-def test_generate_haar_random_pure_states_are_density_matrices():
+def test_generate_haar_random_pure_dms_are_density_matrices():
     rng = np.random.default_rng(123)
 
     states = generate_haar_random_pure_dms(num_states=5, dim=4, rng=rng)

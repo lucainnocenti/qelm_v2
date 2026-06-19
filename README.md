@@ -5,20 +5,20 @@ diagnostics that were previously defined directly in `tests.ipynb`.
 
 ## Structure
 
-- `qelm_rank/linalg.py`: basic matrix norms, inverses, validation, and log-log fits.
-- `qelm_rank/blocks.py`: deterministic SVD block decomposition for a probability matrix `P`.
-- `qelm_rank/noise.py`: scaled noise matrices `Xi` and noisy design matrices `P_hat`.
-- `qelm_rank/trials.py`: fixed-`P` block diagnostics using scaled shot-noise `Xi`.
-- `qelm_rank/plotting.py`: collapse plots, failure-rate plots, and sweep diagnostics.
-- `qelm_rank/quantum.py`: construction of probability matrices from POVM effects and states.
-- `qelm_rank/training.py`: structured QELM specs, contexts, leading-error formulas, and actual noisy least-squares training.
-- `qelm_rank/workflows.py`: notebook workflows that compose `trials.py` and `training.py`.
-- `qelm_rank/markov.py`: Markov-slack helper columns.
+- `qelm/linalg.py`: basic matrix norms, inverses, validation, and log-log fits.
+- `qelm/blocks.py`: deterministic SVD block decomposition for a probability matrix `P`.
+- `qelm/noise.py`: scaled noise matrices `Xi` and noisy design matrices `P_hat`.
+- `qelm/trials.py`: fixed-`P` block diagnostics using scaled shot-noise `Xi`.
+- `qelm/plotting.py`: collapse plots, failure-rate plots, and sweep diagnostics.
+- `qelm/quantum.py`: construction of probability matrices from POVM effects and states.
+- `qelm/training.py`: structured QELM specs, contexts, leading-error formulas, and actual noisy least-squares training.
+- `qelm/workflows.py`: notebook workflows that compose `trials.py` and `training.py`.
+- `qelm/markov.py`: Markov-slack helper columns.
 
 ## Typical notebook usage
 
 ```python
-from qelm_rank import run_toy_low_rank_sweep, plot_metric_vs_predictors
+from qelm import run_toy_low_rank_sweep, plot_metric_vs_predictors
 
 trial_df, summary = run_toy_low_rank_sweep(
     q_values=(4, 8),
@@ -34,7 +34,7 @@ plot_metric_vs_predictors(summary, quantile="p90")
 To inspect deterministic scaling for random quantum probability matrices:
 
 ```python
-from qelm_rank import (
+from qelm import (
     fit_random_quantum_scaling_laws,
     plot_random_quantum_scaling,
     run_random_quantum_scaling_sweep,
@@ -56,15 +56,15 @@ plot_random_quantum_scaling(scaling_df)
 For a real probability matrix, use:
 
 ```python
-from qelm_rank import (
-    generate_haar_random_pure_states,
+from qelm import (
+    generate_haar_random_pure_dms,
     generate_random_rank1_povm,
     probability_matrix_from_povm_states,
     run_single_P_workflow,
 )
 
 effects = generate_random_rank1_povm(nout=8, dim=d, rng=rng)
-states = generate_haar_random_pure_states(num_states=ntr, dim=d, rng=rng)
+states = generate_haar_random_pure_dms(num_states=ntr, dim=d, rng=rng)
 
 P = probability_matrix_from_povm_states(
     povm_effects=effects,  # shape (nout, d, d)

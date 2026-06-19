@@ -4,9 +4,9 @@ This module owns the user-facing QELM objects: declarative specs, resolved
 training/test/target arrays, deterministic leading-error formulas, and Monte
 Carlo estimates of the actual noisy least-squares fit.  It builds exact
 training probability matrices from POVMs and states, then samples noisy design
-matrices ``P_hat`` through :func:`qelm_rank.noise.noisy_probability_matrix`.
+matrices ``P_hat`` through :func:`qelm.noise.noisy_probability_matrix`.
 
-The lower-level ``qelm_rank.trials`` module studies projected scaled noise
+The lower-level ``qelm.trials`` module studies projected scaled noise
 ``Xi = sqrt(N) * (P_hat - P)`` for a fixed matrix and block decomposition.  It
 is a proof-diagnostic layer, not the high-level training API.
 """
