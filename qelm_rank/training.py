@@ -1503,7 +1503,7 @@ def _dual_state_probability_second_moment(
     return U1 @ core @ U1.T
 
 
-def _apply_c22_training_transform(
+def _maybe_apply_correction_term(
     x: np.ndarray,
     U1: np.ndarray,
     U2: np.ndarray,
@@ -1608,10 +1608,27 @@ def leading_training_bias_variance_terms(
     dual_test_second_moment: np.ndarray | None = None,
     pinv_rcond: float = 1e-12,
 ) -> dict:
+    """Leading-order bias/variance formula for one fixed target observable.
+
+    This function is the fixed-target counterpart of
+    ``leading_training_bias_variance_terms_target_average``.  Here
+    ``w_observable`` is one outcome-weight vector representing the target.
+
+    The test distribution can be represented in either of two equivalent ways:
+
+    * explicit probability columns ``test_probabilities``, in which case the
+      function computes the leading error per column and then averages;
+    * a second moment ``test_second_moment = E[p_test p_test.T]``, in which case
+      the test average is performed exactly by quadratic contraction.
+
+    Exact Haar test averages enter through the second-moment branch.  This is
+    the correct object for squared errors: the error is linear in the test
+    probability vector, but MSE and squared bias are quadratic in it.
+    """
     if test_second_moment is None and test_probabilities is None:
         raise ValueError("Provide either test_second_moment or test_probabilities.")
 
-    w_eff = _apply_c22_training_transform(
+    w_eff = _maybe_apply_correction_term(
         w_observable,
         U1,
         U2,
@@ -1622,6 +1639,10 @@ def leading_training_bias_variance_terms(
     P_pinv = np.linalg.pinv(P, rcond=pinv_rcond)
 
     if test_second_moment is not None:
+        # Moment-based test average.  This covers exact Haar averages and any
+        # caller-provided empirical second moment.  The dual moment is needed
+        # because the leading bias is evaluated against the dual test
+        # probabilities, not the primal POVM probabilities.
         test_second_moment = np.asarray(test_second_moment, dtype=float)
         if dual_test_second_moment is None:
             dual_probability_second_moment = _dual_state_probability_second_moment(
@@ -1654,6 +1675,9 @@ def leading_training_bias_variance_terms(
             "variance_max": np.nan,
         }
 
+    # Column-based test average.  This is algebraically equivalent to the
+    # moment branch with test_second_moment = P_test @ P_test.T / ntest, but it
+    # also exposes per-test diagnostics such as max and mean absolute bias.
     test_probabilities = np.asarray(test_probabilities, dtype=float)
     if dual_test_probabilities is None:
         dual_probabilities = _dual_state_probability_columns(
@@ -1664,7 +1688,7 @@ def leading_training_bias_variance_terms(
         )
     else:
         dual_probabilities = np.asarray(dual_test_probabilities, dtype=float)
-    test_eff = _apply_c22_training_transform(
+    test_eff = _maybe_apply_correction_term(
         dual_probabilities,
         U1,
         U2,
@@ -1708,6 +1732,22 @@ def leading_training_bias_variance_terms_target_average(
     dual_test_second_moment: np.ndarray | None = None,
     pinv_rcond: float = 1e-12,
 ) -> dict:
+    """Leading-order bias/variance formula averaged over target observables.
+
+    This is the target-average analogue of
+    ``leading_training_bias_variance_terms``.  Instead of receiving one target
+    vector ``w_observable``, it receives
+    ``target_second_moment = E[w w.T]``.
+
+    For a fixed noisy-training linearized map ``Delta``, target/test error has
+    the form ``p_test.T @ Delta @ w``.  Averaging its square therefore needs only
+    the second moments ``E[p_test p_test.T]`` and ``E[w w.T]``.  In particular,
+    exact Haar averages are population averages here, not Monte Carlo samples.
+
+    The function accepts tests either as explicit columns or as a second moment.
+    Column tests are converted once to their empirical second moment because the
+    target-averaged formula has no per-target/per-test diagnostics to preserve.
+    """
     if test_second_moment is None and test_probabilities is None:
         raise ValueError("Provide either test_second_moment or test_probabilities.")
 
@@ -1726,6 +1766,8 @@ def leading_training_bias_variance_terms_target_average(
         else:
             dual_probability_second_moment = np.asarray(dual_test_second_moment, dtype=float)
     else:
+        # Convert an explicit finite test set into the same representation used
+        # by exact Haar tests: S_test = average_j p_j p_j.T.
         test_probabilities = np.asarray(test_probabilities, dtype=float)
         test_second_moment = test_probabilities @ test_probabilities.T / test_probabilities.shape[1]
         if dual_test_probabilities is None:
@@ -1741,6 +1783,10 @@ def leading_training_bias_variance_terms_target_average(
             dual_probabilities @ dual_probabilities.T / dual_probabilities.shape[1]
         )
 
+    # The target-averaged leading terms are matrix contractions of the same
+    # fixed-target linear maps.  If target_second_moment were replaced by
+    # outer(w, w), these contractions reduce to the fixed-target formula averaged
+    # over a singleton target ensemble.
     target_transform = _c22_training_transform_matrix(
         nout,
         U1,
@@ -1789,12 +1835,20 @@ def estimate_actual_training_mse(
     test_second_moment: np.ndarray | None = None,
     lstsq_rcond: float | None = None,
 ) -> dict:
-    """Estimate QELM training error by Monte Carlo over noisy training matrices.
+    """Estimate actual training error for one fixed target observable.
 
     The input ``P`` is the exact training probability/design matrix.  Each
     Monte Carlo repeat samples a noisy design matrix ``P_hat`` with
     ``noisy_probability_matrix`` and refits the observable weights against the
     noiseless training labels ``P.T @ w_observable``.
+
+    This is the fixed-target counterpart of
+    ``estimate_actual_training_mse_target_average``.  It tracks only
+    ``delta = w_hat - w_observable`` for each noisy training repeat, so it is
+    cheaper than fitting the full target map.  Test averaging follows the same
+    convention as the leading fixed-target function: explicit test columns are
+    averaged columnwise, while a provided second moment gives the exact
+    quadratic average ``E[(p_test.T @ delta)^2]``.
     """
     rng = get_rng(rng)
     if actual_noise_trials <= 0:
@@ -1814,6 +1868,8 @@ def estimate_actual_training_mse(
     mean_delta = np.mean(deltas, axis=0)
 
     if test_second_moment is not None:
+        # Exact/moment test average for the squared error.  This branch is used
+        # for exact Haar test averages.
         test_second_moment = np.asarray(test_second_moment, dtype=float)
         mse_by_training_noise = np.einsum(
             "ti,ij,tj->t",
@@ -1834,6 +1890,8 @@ def estimate_actual_training_mse(
             "actual_noise_trials": int(actual_noise_trials),
         }
 
+    # Explicit finite test set: compute every test error and average over test
+    # columns.  This preserves finite-sample diagnostics such as abs-bias mean.
     test_probabilities = np.asarray(test_probabilities, dtype=float)
     errors = test_probabilities.T @ deltas.T
     errors = errors.T
@@ -1862,11 +1920,25 @@ def estimate_actual_training_mse_target_average(
     test_second_moment: np.ndarray | None = None,
     lstsq_rcond: float | None = None,
 ) -> dict:
-    """Estimate training error averaged over a target-observable ensemble.
+    """Estimate actual training error averaged over target observables.
 
     This is the target-average counterpart of ``estimate_actual_training_mse``:
     each repeat samples a noisy design matrix ``P_hat`` and fits the linear map
     from noisy training probabilities back to exact training probabilities.
+
+    The fitted map is compared with the identity:
+
+        ``Delta = lstsq(P_hat.T, P.T)[0] - I``.
+
+    For any target weight vector ``w``, this gives ``w_hat - w = Delta @ w``.
+    Therefore the target/test averaged squared error is
+
+        ``E[(p_test.T @ Delta @ w)^2]``
+
+    and is computed by contracting ``Delta`` against
+    ``test_second_moment = E[p_test p_test.T]`` and
+    ``target_second_moment = E[w w.T]``.  This is why exact Haar target and test
+    averages are handled with second moments rather than sampled states.
     """
     rng = get_rng(rng)
     if actual_noise_trials <= 0:
@@ -1876,6 +1948,8 @@ def estimate_actual_training_mse_target_average(
 
     target_second_moment = np.asarray(target_second_moment, dtype=float)
     if test_second_moment is None:
+        # Put finite test columns in the same quadratic representation as an
+        # exact Haar test average.
         test_probabilities = np.asarray(test_probabilities, dtype=float)
         test_second_moment = test_probabilities @ test_probabilities.T / test_probabilities.shape[1]
     else:
@@ -1886,6 +1960,9 @@ def estimate_actual_training_mse_target_average(
 
     for _ in range(actual_noise_trials):
         P_hat = noisy_probability_matrix(P, rng, Nshots=N, noise=noise)
+        # Fit every target simultaneously.  Multiplying this matrix by a target
+        # weight vector gives the same result as fitting that target alone, but
+        # lets us average over target ensembles via E[w w.T].
         fit_matrix = np.linalg.lstsq(P_hat.T, P.T, rcond=lstsq_rcond)[0]
         deltas.append(fit_matrix - identity)
 
@@ -2042,6 +2119,18 @@ def _run_qelm_training_resolved(
     return_fits: bool = False,
     return_fit_matrix: bool = False,
 ) -> QELMTrainingResults:
+    """Run the actual noisy-training simulation for resolved target/test data.
+
+    This is the implementation used by ``QELMRun.train_model``.  It mirrors the
+    two standalone helpers above:
+
+    * fixed target: fit one weight vector and evaluate ``p_test.T @ (w_hat-w)``;
+    * target average: fit the whole linear map and evaluate
+      ``p_test.T @ Delta @ w`` through test/target second moments.
+
+    The split is intentional for performance.  Fixed-target runs avoid fitting
+    the full map unless ``return_fit_matrix`` is requested.
+    """
     rng = get_rng(rng)
     P = context.P_train
     N = _required_noise_N(spec.noise)
@@ -2056,13 +2145,14 @@ def _run_qelm_training_resolved(
         raise ValueError("Resolved test must provide either second_moment or probabilities.")
 
     if target.is_average:
-        # in this branch we compute the average over target observables
-        # this is to compute the exact Haar pure-state average training error by simulating the training process with noise
+        # Target-average actual MSE.  We cannot fit a single weight vector,
+        # because the target is an ensemble represented by E[w w.T].  Instead
+        # each noisy training repeat fits the full linear map from exact
+        # training probabilities to fitted outcome weights.
         target_second_moment = np.asarray(target.second_moment, dtype=float)
-        # the purpose of this line is to enable the general formula with einsum regardless
-        # of whether the test is a single state or an average over states.
-        # If the test is a single state, its "second moment" is just the outer product of
-        # its probability vector with itself, which is what _test_second_moment computes.
+        # Put fixed, finite-sample, and exact-Haar tests into one quadratic
+        # representation.  For a fixed test state this is outer(p, p); for a
+        # finite sample it is the empirical average; for Haar it is exact.
         test_second_moment = _test_second_moment(test)
         fit_matrices = []
         identity = np.eye(P.shape[0])
@@ -2076,6 +2166,8 @@ def _run_qelm_training_resolved(
         fit_matrices = np.asarray(fit_matrices, dtype=float)
         deltas = fit_matrices - identity
         mean_delta = np.mean(deltas, axis=0)
+        # For each noisy repeat, average (p.T @ Delta @ w)^2 over the resolved
+        # test and target ensembles using only their second moments.
         mse_by_training_noise = np.einsum(
             "tai,ab,tbj,ij->t",
             deltas,
@@ -2100,6 +2192,8 @@ def _run_qelm_training_resolved(
             fit_matrices=stored_fit_matrices,
         )
 
+    # Fixed-target actual MSE.  This path is cheaper than the target-average
+    # path because it fits only the requested target weight vector.
     w_observable = _target_outcome_weights(target, context)
     y_train = P.T @ w_observable
     fitted_weights = []
@@ -2121,6 +2215,8 @@ def _run_qelm_training_resolved(
     mean_delta = np.mean(deltas, axis=0)
 
     if test.second_moment is not None:
+        # Exact/moment test average for a fixed target:
+        # E[(p_test.T @ delta)^2] = delta.T E[p_test p_test.T] delta.
         test_second_moment = np.asarray(test.second_moment, dtype=float)
         mse_by_training_noise = np.einsum(
             "ti,ij,tj->t",
@@ -2134,9 +2230,8 @@ def _run_qelm_training_resolved(
         variance = float(mse - bias_sq)
         abs_bias_mean = np.nan
     else:
-        # I think this is where the actual bias and variance are computed when not
-        # averaging over the test states (we might have already averaged over target
-        # observable before)
+        # Explicit finite test columns.  Average over columns directly so the
+        # reported bias diagnostics remain per-test finite-sample quantities.
         test_probabilities = np.asarray(test.probabilities, dtype=float)
         errors = deltas @ test_probabilities
         mean_error_by_test = np.mean(errors, axis=0)
@@ -2216,6 +2311,12 @@ def with_training_sweep_value(
 
 
 def _test_second_moment(test: ResolvedTest) -> np.ndarray:
+    """Return E[p p.T] for any resolved test representation.
+
+    Exact Haar tests already store the population second moment.  Column-based
+    tests, including one fixed state, are converted to the matching empirical
+    second moment.
+    """
     if test.second_moment is not None:
         return np.asarray(test.second_moment, dtype=float)
     probabilities = np.asarray(test.probabilities, dtype=float)

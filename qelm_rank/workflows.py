@@ -20,6 +20,11 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import numpy as np
 import pandas as pd
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - optional dependency
+    tqdm = None
+
 from .blocks import (
     PBlocks,
     block_report,
@@ -501,9 +506,23 @@ def run_repeated_trials(
     master_rng = get_rng(seed)
     shared_kwargs = shared_kwargs or {}
     rows = []
+    total_steps = len(configs) * trials
+    started = perf_counter()
 
-    for config in configs:
-        if verbose:
+    pbar = None
+    if verbose and tqdm is not None:
+        pbar = tqdm(
+            total=total_steps,
+            desc="Running trials",
+            unit="trial",
+            leave=False,
+            dynamic_ncols=True,
+        )
+    elif verbose:
+        print(f"Running {total_steps} trial(s)...")
+
+    try:
+        for config in configs:
             parts = []
             for field in progress_fields:
                 if field in config:
@@ -513,34 +532,50 @@ def run_repeated_trials(
                 else:
                     continue
                 parts.append(f"{field}={value}")
-            print(", ".join([*parts, f"trials={trials}"]))
 
-        for trial in range(trials):
-            trial_seed = int(master_rng.integers(0, 2**32 - 1))
-            kwargs = {**shared_kwargs, **config}
+            if pbar is not None and parts:
+                pbar.set_postfix_str(", ".join(parts), refresh=False)
 
-            if rng_arg is not None:
-                kwargs[rng_arg] = np.random.default_rng(trial_seed)
-            elif seed_arg is not None:
-                kwargs[seed_arg] = trial_seed
+            for trial in range(trials):
+                trial_seed = int(master_rng.integers(0, 2**32 - 1))
+                kwargs = {**shared_kwargs, **config}
 
-            try:
-                row = trial_fn(**kwargs)
-                row["failed"] = False
-                row["error"] = ""
-            except Exception as exc:
-                if not fail_soft:
-                    raise
-                row = {
-                    **shared_kwargs,
-                    **config,
-                    "failed": True,
-                    "error": repr(exc),
-                }
+                if rng_arg is not None:
+                    kwargs[rng_arg] = np.random.default_rng(trial_seed)
+                elif seed_arg is not None:
+                    kwargs[seed_arg] = trial_seed
 
-            row["trial"] = trial
-            row["trial_seed"] = trial_seed
-            rows.append(row)
+                try:
+                    row = trial_fn(**kwargs)
+                    row["failed"] = False
+                    row["error"] = ""
+                except Exception as exc:
+                    if not fail_soft:
+                        raise
+                    row = {
+                        **shared_kwargs,
+                        **config,
+                        "failed": True,
+                        "error": repr(exc),
+                    }
+
+                row["trial"] = trial
+                row["trial_seed"] = trial_seed
+                rows.append(row)
+
+                if pbar is not None:
+                    pbar.update(1)
+                elif verbose:
+                    completed = len(rows)
+                    print(f"\rProgress: {completed}/{total_steps} trial(s)", end="", flush=True)
+    finally:
+        elapsed = perf_counter() - started
+        if pbar is not None:
+            pbar.close()
+        elif verbose and total_steps > 0:
+            print("\r" + " " * 60 + "\r", end="", flush=True)
+        if verbose:
+            print(f"Elapsed time: {elapsed:.2f}s")
 
     return pd.DataFrame(rows)
 

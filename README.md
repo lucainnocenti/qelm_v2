@@ -7,11 +7,12 @@ diagnostics that were previously defined directly in `tests.ipynb`.
 
 - `qelm_rank/linalg.py`: basic matrix norms, inverses, validation, and log-log fits.
 - `qelm_rank/blocks.py`: deterministic SVD block decomposition for a probability matrix `P`.
-- `qelm_rank/noise.py`: multinomial and Gaussian shot-noise generation.
-- `qelm_rank/trials.py`: one-trial diagnostics, repeated trials, and summary tables.
+- `qelm_rank/noise.py`: scaled noise matrices `Xi` and noisy design matrices `P_hat`.
+- `qelm_rank/trials.py`: fixed-`P` block diagnostics using scaled shot-noise `Xi`.
 - `qelm_rank/plotting.py`: collapse plots, failure-rate plots, and sweep diagnostics.
 - `qelm_rank/quantum.py`: construction of probability matrices from POVM effects and states.
-- `qelm_rank/workflows.py`: high-level workflows for one `P`, toy matrices, and dimension sweeps.
+- `qelm_rank/training.py`: structured QELM specs, contexts, leading-error formulas, and actual noisy least-squares training.
+- `qelm_rank/workflows.py`: notebook workflows that compose `trials.py` and `training.py`.
 - `qelm_rank/markov.py`: Markov-slack helper columns.
 
 ## Typical notebook usage
