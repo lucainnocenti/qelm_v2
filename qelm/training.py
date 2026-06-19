@@ -29,12 +29,14 @@ from .quantum import (
     QuantumStateBatch,
     _operator_row_inner_products,
     generate_haar_random_kets,
+    generate_qubit_mub_povm,
     get_rng,
     haar_moments_from_operator_rows,
 )
 
 
 RANDOM_POVM_KIND = "random_rank1"
+QUBIT_MUB_POVM_KIND = "qubit_mub"
 EXPLICIT_POVM_KIND = "effects"
 HAAR_PURE_TRAIN_STATES_KIND = "haar_pure"
 HAAR_PURE_AVERAGE_SELECTOR = "haar_pure_average"
@@ -79,11 +81,15 @@ def _reject_alias_keys(mapping: dict, aliases: set[str], *, context: str) -> Non
 def _infer_explicit_povm_nout(povm: object) -> int | None:
     if isinstance(povm, POVM):
         return povm.nout
-    if povm is None or isinstance(povm, str):
+    if isinstance(povm, str):
+        return 6 if povm.lower() == QUBIT_MUB_POVM_KIND else None
+    if povm is None:
         return None
 
     effects = povm
     if isinstance(povm, dict):
+        if str(povm.get("kind", "")).lower() == QUBIT_MUB_POVM_KIND:
+            return 6
         if "effects" not in povm:
             return None
         effects = povm["effects"]
@@ -798,9 +804,9 @@ def _povm_kind_from_spec(povm) -> str:
 
     if isinstance(povm, str):
         kind = povm.lower()
-        if kind != RANDOM_POVM_KIND:
-            raise ValueError("Only 'random_rank1' is supported as a string POVM spec.")
-        return RANDOM_POVM_KIND
+        if kind in {RANDOM_POVM_KIND, QUBIT_MUB_POVM_KIND}:
+            return kind
+        raise ValueError("Only 'random_rank1' and 'qubit_mub' are supported as string POVM specs.")
 
     if isinstance(povm, dict):
         _reject_alias_keys(
@@ -814,6 +820,8 @@ def _povm_kind_from_spec(povm) -> str:
         kind = str(povm.get("kind", RANDOM_POVM_KIND)).lower()
         if kind == RANDOM_POVM_KIND:
             return RANDOM_POVM_KIND
+        if kind == QUBIT_MUB_POVM_KIND:
+            return QUBIT_MUB_POVM_KIND
         if kind == EXPLICIT_POVM_KIND:
             return EXPLICIT_POVM_KIND
         raise ValueError(f"Unknown POVM spec kind: {kind!r}.")
@@ -826,6 +834,9 @@ def _povm_kind_from_spec(povm) -> str:
 
 def _povm_shape_from_spec(povm) -> tuple[int | None, int | None]:
     kind = _povm_kind_from_spec(povm)
+
+    if kind == QUBIT_MUB_POVM_KIND:
+        return 6, 2
 
     if kind == EXPLICIT_POVM_KIND:
         if isinstance(povm, POVM):
@@ -875,11 +886,46 @@ def _validate_random_povm_spec_for_config(
         )
 
 
+def _validate_qubit_mub_povm_spec_for_config(
+    povm,
+    *,
+    nout: int,
+    dim: int,
+) -> None:
+    if int(nout) != 6:
+        raise ValueError(f"Qubit MUB POVM has nout=6, but the config has nout={nout}.")
+    if int(dim) != 2:
+        raise ValueError(f"Qubit MUB POVM has dimension d=2, but the config has d={dim}.")
+
+    if not isinstance(povm, dict):
+        return
+
+    _reject_alias_keys(
+        povm,
+        {"type", "povm_effects", "num_outcomes", "d"},
+        context="POVM spec",
+    )
+    spec_nout = povm.get("nout")
+    spec_dim = povm.get("dim")
+    if spec_nout is not None and int(spec_nout) != 6:
+        raise ValueError(f"Qubit MUB POVM spec has nout={spec_nout}, expected 6.")
+    if spec_dim is not None and int(spec_dim) != 2:
+        raise ValueError(f"Qubit MUB POVM spec has d={spec_dim}, expected 2.")
+
+
 def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> POVM:
     kind = _povm_kind_from_spec(povm)
     if kind == RANDOM_POVM_KIND:
         _validate_random_povm_spec_for_config(povm, nout=nout, dim=dim)
         return POVM.random_rank1(nout=nout, dim=dim, rng=rng)
+    if kind == QUBIT_MUB_POVM_KIND:
+        _validate_qubit_mub_povm_spec_for_config(povm, nout=nout, dim=dim)
+        return POVM.from_effects(
+            generate_qubit_mub_povm(),
+            dim=2,
+            nout=6,
+            label=QUBIT_MUB_POVM_KIND,
+        )
 
     if isinstance(povm, POVM):
         if povm.nout != int(nout):

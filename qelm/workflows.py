@@ -1273,6 +1273,8 @@ def _povm_descriptor(povm) -> dict:
                 if key in povm:
                     descriptor[key] = int(povm[key])
         return descriptor
+    if kind == "qubit_mub":
+        return {"kind": "qubit_mub", "nout": 6, "dim": 2}
 
     if hasattr(povm, "effects"):
         effects = np.asarray(povm.effects)

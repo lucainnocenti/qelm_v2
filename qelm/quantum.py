@@ -294,6 +294,18 @@ def _pure_state_vector_to_density(vector: np.ndarray, dim: int, name: str = "sta
     return np.outer(vector, vector.conj())
 
 
+def ket2dm(vector: np.ndarray) -> np.ndarray:
+    """
+    Return the density matrix |psi><psi| for a pure state vector.
+
+    The input vector is normalized before forming the projector.
+    """
+    vector = np.asarray(vector, dtype=complex)
+    if vector.ndim != 1:
+        raise ValueError("vector must be one-dimensional.")
+    return _pure_state_vector_to_density(vector, dim=vector.shape[0], name="vector")
+
+
 def generate_haar_random_state_vectors(**kwargs):
     raise DeprecationWarning("generate_haar_random_state_vectors is deprecated; use generate_haar_random_kets and transpose instead.")
 
@@ -379,6 +391,28 @@ def generate_random_rank1_povm(
     # usual convention we use to define these POVMs, but the distribution of effects
     # is the same, so it doesn't really matter.
     return np.einsum("ai,aj->aij", isometry.conj(), isometry)
+
+
+def generate_qubit_mub_povm() -> np.ndarray:
+    """
+    Return the six-outcome qubit POVM from the X, Y, and Z mutually unbiased bases.
+
+    The effects are one-third times the rank-one projectors onto
+    |0>, |1>, |+>, |->, |+i>, and |-i>, so they sum to the 2 x 2 identity.
+    """
+    states = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [1.0, -1.0],
+            [1.0, 1.0j],
+            [1.0, -1.0j],
+        ],
+        dtype=complex,
+    )
+    states /= np.linalg.norm(states, axis=1, keepdims=True)
+    return np.stack([ket2dm(state) / 3.0 for state in states], axis=0)
 
 
 @dataclass(frozen=True)
