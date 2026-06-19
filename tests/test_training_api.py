@@ -2,9 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import qelm_rank.training as training
-import qelm_rank.workflows as workflows
-from qelm_rank import (
+import qelm.training as training
+import qelm.workflows as workflows
+from qelm import (
     QELMDataSpec,
     QELMNoiseSpec,
     QELMTargetRequest,

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from qelm_rank import (
+from qelm import (
     POVM,
     QELMQuantumDataset,
     QuantumStateBatch,

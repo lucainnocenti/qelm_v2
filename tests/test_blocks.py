@@ -1,11 +1,11 @@
 import numpy as np
 
-from qelm_rank.blocks import (
+from qelm.blocks import (
     deterministic_blocks_from_P,
     schur_covariance_blocks,
     svd_probability_blocks,
 )
-from qelm_rank.quantum import POVM, QuantumStateBatch
+from qelm.quantum import POVM, QuantumStateBatch
 
 
 def make_toy_rank_r_probability_matrix(nout, ntr, r, rng):

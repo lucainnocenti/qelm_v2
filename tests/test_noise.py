@@ -1,6 +1,6 @@
 import numpy as np
 
-from qelm_rank import (
+from qelm import (
     generate_gaussian_Xi,
     generate_multinomial_Xi,
     noisy_probability_matrix,
