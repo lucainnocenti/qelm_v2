@@ -82,7 +82,7 @@ def plot_median_iqr(
 def plot_summary_series(
     summary_df: pd.DataFrame,
     *,
-    x_col: str = "p_kernel",
+    x_col: str = "ntr",
     plots,
     thresholds: Optional[Dict[str, float]] = None,
     figsize: Tuple[float, float] = (7, 4.5),
@@ -135,7 +135,7 @@ def plot_summary_series(
             ax.set_xscale("log")
         if logy:
             ax.set_yscale("log")
-        ax.set_xlabel("p_kernel = ntr - r" if x_col == "p_kernel" else x_col)
+        ax.set_xlabel(x_col)
         ax.set_ylabel(spec["ylabel"])
 
         title = spec["title"]
@@ -256,8 +256,6 @@ def plot_mean_median_quantile_summary(
 
         ax.set_title(plot_title)
         x_labels = {
-            "p_kernel": "training null-space dimension p = n_tr - d^2",
-            "q": "output complement dimension q = n_out - d^2",
             "N": "training shots per state N",
             "ntr": "number of training states n_tr",
             "nout": "number of POVM outcomes n_out",
@@ -305,6 +303,11 @@ def plot_grouped_mean_median_quantile_summary(
     qhi_suffix = f"q{int(round(100 * qhi))}"
 
     x = summary_df[x_col].to_numpy(dtype=float)
+    x_labels = {
+        "N": r"$N$",
+        "ntr": r"$n_{\mathrm{tr}}$",
+        "nout": r"$n_{\mathrm{out}}$",
+    }
 
     for series_specs, title, ylabel in plots:
         fig, ax = plt.subplots(figsize=figsize)
@@ -352,7 +355,7 @@ def plot_grouped_mean_median_quantile_summary(
                 )
 
         ax.set_title(title)
-        ax.set_xlabel(x_col)
+        ax.set_xlabel(x_labels.get(x_col, x_col))
         ax.set_ylabel(ylabel)
 
         if logx:

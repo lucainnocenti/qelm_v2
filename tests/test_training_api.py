@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 import qelm.training as training
+import qelm.training_reports as training_reports
 import qelm.workflows as workflows
 from qelm import (
     QELMDataSpec,
@@ -18,16 +19,19 @@ from qelm import (
     clear_default_rng,
     compute_qelm_diagnostics,
     compute_qelm_leading_error,
+    generate_qubit_mub_povm,
     generate_random_rank1_povm,
     leading_training_bias_variance_terms,
     load_tilde_u_training_approx_report_data,
     make_qelm_training_context,
+    plot_saved_training_data,
     resolve_qelm_target,
     resolve_qelm_test,
     run_qelm_actual_training,
     run_tilde_u_training_approx_experiment,
     run_tilde_u_training_approx_report,
     set_default_rng,
+    summarize_saved_training_data,
     tilde_u_correction_operator_diagnostics,
 )
 
@@ -35,6 +39,8 @@ from qelm import (
 def _small_spec(*, povm=None, target=None, train_states=None, ntr=12):
     if train_states is None:
         train_states = {"kind": "haar_pure", "num_states": ntr}
+    if isinstance(povm, np.ndarray):
+        povm = {"effects": povm, "label": "test_povm"}
     return QELMTrainingSpec(
         data=QELMDataSpec(d=2, nout=8, povm=povm, train_states=train_states),
         target=QELMTargetRequest(observable=target, normalization="none"),
@@ -97,7 +103,7 @@ def test_sampled_test_matrices_are_lazy_and_cached():
         data=QELMDataSpec(
             d=2,
             nout=8,
-            povm=povm,
+            povm={"effects": povm, "label": "test_povm"},
             train_states={"kind": "haar_pure", "num_states": 12},
         ),
         target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
@@ -126,13 +132,31 @@ def test_sampled_test_matrices_are_lazy_and_cached():
     assert context._dual_effect_rows_cache is not None
 
 
-def test_explicit_array_povm_allows_omitting_nout():
+def test_explicit_array_povm_requires_label_for_training_context():
     rng = np.random.default_rng(123)
     povm = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
     spec = QELMTrainingSpec(
         data=QELMDataSpec(
             d=2,
             povm=povm,
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        test=QELMTestRequest(state="haar_pure_average"),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=2),
+    )
+
+    with pytest.raises(ValueError, match="Explicit POVM specs require a non-empty label"):
+        QELMRun(spec, rng=np.random.default_rng(456)).context
+
+
+def test_explicit_labeled_povm_dictionary_allows_omitting_nout():
+    rng = np.random.default_rng(123)
+    povm = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            povm={"effects": povm, "label": "test_povm"},
             train_states={"kind": "haar_pure", "num_states": 12},
         ),
         target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
@@ -149,7 +173,7 @@ def test_explicit_array_povm_allows_omitting_nout():
 
 def test_explicit_povm_object_allows_omitting_nout():
     effects = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
-    povm = POVM.from_effects(effects, dim=2)
+    povm = POVM.from_effects(effects, dim=2, label="test_povm")
     spec = QELMTrainingSpec(
         data=QELMDataSpec(
             d=2,
@@ -197,7 +221,7 @@ def test_training_state_vector_columns_are_accepted():
         data=QELMDataSpec(
             d=2,
             nout=8,
-            povm=povm,
+            povm={"effects": povm, "label": "test_povm"},
             train_states={
                 "kind": "state_vectors",
                 "vectors": train_vectors,
@@ -267,6 +291,42 @@ def test_random_rank1_dict_povm_spec_builds_valid_context():
 
     assert context.P_train.shape == (8, 12)
     np.testing.assert_allclose(context.P_train.sum(axis=0), 1.0, atol=1e-10)
+
+
+def test_qubit_mub_string_povm_spec_builds_valid_context_without_nout():
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            povm="qubit_mub",
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        test=QELMTestRequest(state=np.array([[1.0, 0.0], [0.0, 0.0]])),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=1),
+    )
+
+    context = make_qelm_training_context(spec, rng=np.random.default_rng(123))
+
+    assert spec.data.nout == 6
+    assert context.povm.label == "qubit_mub"
+    np.testing.assert_allclose(context.povm.effects, generate_qubit_mub_povm(), atol=1e-12)
+    assert context.P_train.shape == (6, 12)
+
+
+def test_qubit_mub_dict_povm_spec_rejects_wrong_dimension():
+    spec = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=3,
+            povm={"kind": "qubit_mub"},
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable=np.eye(3)),
+        test=QELMTestRequest(state=np.eye(3) / 3),
+        noise=QELMNoiseSpec(N=20, noise="gaussian", actual_noise_trials=1),
+    )
+
+    with pytest.raises(ValueError, match="dimension d=2"):
+        make_qelm_training_context(spec, rng=np.random.default_rng(123))
 
 
 def test_test_state_alias_is_rejected():
@@ -349,7 +409,14 @@ def test_resolved_training_column_test_carries_raw_state_operator():
         data=QELMDataSpec(
             d=2,
             nout=8,
-            povm=generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123)),
+            povm={
+                "effects": generate_random_rank1_povm(
+                    nout=8,
+                    dim=2,
+                    rng=np.random.default_rng(123),
+                ),
+                "label": "test_povm",
+            },
             train_states={
                 "kind": "states",
                 "states": np.array(
@@ -723,6 +790,201 @@ def test_tilde_u_report_saves_portable_parquet_zip(tmp_path):
     assert loaded["metadata"]["sweep_values"] == [12, 16]
 
 
+def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monkeypatch):
+    target = np.array([[1.0, 0.0], [0.0, 0.0]])
+    base = _small_spec(target=target, train_states={"kind": "haar_pure"})
+    output_file = tmp_path / "tilde_u_sweep.zip"
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="ntr",
+        sweep_values=(12, 16),
+        repetitions=1,
+        seed=123,
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        make_plots=False,
+        output_file=output_file,
+    )
+    run_tilde_u_training_approx_report(study)
+
+    loaded = load_tilde_u_training_approx_report_data(output_file)
+    raw, summary, slopes = summarize_saved_training_data(
+        loaded,
+        quantile_band=(0.10, 0.90),
+    )
+
+    np.testing.assert_allclose(
+        raw["leading_mse_exact"],
+        loaded["raw"]["leading_bias_sq"] + loaded["raw"]["leading_variance"],
+    )
+    assert set(summary["ntr"]) == {12, 16}
+    assert "leading_mse_exact_q10" in summary.columns
+    assert "actual_mse_q90" in summary.columns
+    assert set(slopes["x"]) == {"ntr"}
+
+    calls = {}
+
+    def fake_plotter(summary_df, **kwargs):
+        calls["summary"] = summary_df
+        calls.update(kwargs)
+
+    monkeypatch.setattr(
+        training_reports,
+        "plot_grouped_mean_median_quantile_summary",
+        fake_plotter,
+    )
+
+    plotted_raw, plotted_summary, plotted_slopes = plot_saved_training_data(
+        output_file,
+        plots="mse",
+        quantile_band=(0.10, 0.90),
+        show_mean=False,
+    )
+
+    assert calls["x_col"] == "ntr"
+    expected_mse_plot = workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"]
+    mse_series, mse_title, mse_ylabel = calls["plots"][0]
+    assert mse_series == expected_mse_plot[0]
+    assert expected_mse_plot[1] in mse_title
+    assert mse_ylabel == expected_mse_plot[2]
+    title_lines = mse_title.splitlines()
+    assert title_lines[1] == "POVM=random_rank1, nout=8; N=20"
+    assert title_lines[2] == "test=fixed; target=fixed; q10-q90; noise=gaussian"
+    for text in (
+        "POVM=random_rank1, nout=8",
+        "N=20",
+        "test=fixed",
+        "target=fixed",
+        "q10-q90",
+        "noise=gaussian",
+    ):
+        assert text in mse_title
+    assert "quantiles=" not in mse_title
+    assert calls["quantile_band"] == (0.10, 0.90)
+    assert calls["show_mean"] is False
+    pd.testing.assert_frame_equal(plotted_raw, raw)
+    pd.testing.assert_frame_equal(plotted_summary, summary)
+    pd.testing.assert_frame_equal(plotted_slopes, slopes)
+
+
+@pytest.mark.parametrize(
+    ("x_col", "expected_label"),
+    [
+        ("ntr", r"$n_{\mathrm{tr}}$"),
+        ("nout", r"$n_{\mathrm{out}}$"),
+        ("N", r"$N$"),
+    ],
+)
+def test_grouped_tilde_u_plot_uses_latex_axis_labels(monkeypatch, x_col, expected_label):
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    summary = pd.DataFrame(
+        {
+            x_col: [12, 16],
+            "actual_mse_median": [1.0, 0.8],
+            "actual_mse_mean": [1.1, 0.9],
+            "actual_mse_q10": [0.9, 0.7],
+            "actual_mse_q90": [1.2, 1.0],
+        }
+    )
+
+    workflows.plot_grouped_mean_median_quantile_summary(
+        summary,
+        x_col=x_col,
+        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        quantile_band=(0.10, 0.90),
+        logx=False,
+        logy=False,
+    )
+
+    assert plt.gcf().axes[0].get_xlabel() == expected_label
+    plt.close("all")
+
+
+def test_live_tilde_u_mse_plot_title_contains_context(monkeypatch):
+    base = QELMTrainingSpec(
+        data=QELMDataSpec(
+            d=2,
+            nout=8,
+            povm=None,
+            train_states={"kind": "haar_pure", "num_states": 12},
+        ),
+        target=QELMTargetRequest(observable="haar_pure_average"),
+        test=QELMTestRequest(state="haar_pure_average"),
+        noise=QELMNoiseSpec(noise="multinomial", actual_noise_trials=1),
+    )
+    study = TildeUTrainingApproxStudySpec(
+        base=base,
+        sweep_col="N",
+        sweep_values=(20,),
+        repetitions=1,
+        seed=123,
+        quantile_band=(0.25, 0.75),
+        verbose=False,
+        show_summary=False,
+        show_slopes=False,
+        plots="mse",
+    )
+    calls = {}
+
+    def fake_plotter(summary_df, **kwargs):
+        calls["summary"] = summary_df
+        calls.update(kwargs)
+
+    monkeypatch.setattr(
+        training_reports,
+        "plot_grouped_mean_median_quantile_summary",
+        fake_plotter,
+    )
+
+    run_tilde_u_training_approx_report(study)
+
+    mse_title = calls["plots"][0][1]
+    title_lines = mse_title.splitlines()
+    assert title_lines[1] == "POVM=random_rank1, nout=8; ntr=12"
+    assert title_lines[2] == "test=haar; target=haar; q25-q75; noise=multinomial"
+    for text in (
+        "POVM=random_rank1, nout=8",
+        "ntr=12",
+        "test=haar",
+        "target=haar",
+        "q25-q75",
+        "noise=multinomial",
+    ):
+        assert text in mse_title
+    assert "Haar avg" not in mse_title
+    assert "quantiles=" not in mse_title
+
+
+def test_tilde_u_mse_plot_title_recovers_old_unlabeled_mub_metadata():
+    metadata = {
+        "sweep_col": "ntr",
+        "data": {
+            "povm": {
+                "kind": "explicit",
+                "effects": workflows._array_payload(generate_qubit_mub_povm()),
+            },
+            "train_state_count": None,
+        },
+        "test": {"state": {"kind": "haar_pure_average"}},
+        "target": {"observable": {"kind": "haar_pure_average"}},
+        "noise": {"N": 100, "noise": "multinomial"},
+    }
+
+    title = workflows._tilde_u_training_context_title_suffix(
+        metadata,
+        quantile_band=(0.05, 0.95),
+    )
+    normalized = workflows._normalize_tilde_u_report_metadata(metadata)
+
+    lines = title.splitlines()
+    assert lines[0] == "POVM=qubit_mub; N=100"
+    assert lines[1] == "test=haar; target=haar; q5-q95; noise=multinomial"
+    assert normalized["data"]["povm"]["label"] == "qubit_mub"
+
+
 def test_tilde_u_report_metadata_stores_explicit_povm_and_training_states(tmp_path):
     povm = generate_random_rank1_povm(nout=8, dim=2, rng=np.random.default_rng(123))
     train_states = QuantumStateBatch.haar_pure_from_columns(
@@ -749,6 +1011,7 @@ def test_tilde_u_report_metadata_stores_explicit_povm_and_training_states(tmp_pa
 
     loaded = load_tilde_u_training_approx_report_data(tmp_path / "explicit.zip")
     assert loaded["metadata"]["data"]["povm"]["kind"] == "explicit"
+    assert loaded["metadata"]["data"]["povm"]["label"] == "test_povm"
     assert loaded["metadata"]["data"]["povm"]["effects"]["shape"] == [8, 2, 2]
     assert loaded["metadata"]["data"]["train_states"]["kind"] == "explicit"
     assert loaded["metadata"]["data"]["train_states"]["states"]["shape"] == [12, 2, 2]
@@ -769,6 +1032,23 @@ def test_tilde_u_plot_selector_uses_short_keys():
 
     with pytest.raises(ValueError, match="Unknown tilde-U plot key"):
         workflows._tilde_u_training_approx_plots_from_keys("not_a_plot")
+
+
+def test_training_report_helpers_are_reexported_for_compatibility():
+    assert workflows.plot_saved_training_data is training_reports.plot_saved_training_data
+    assert workflows.summarize_saved_training_data is training_reports.summarize_saved_training_data
+    assert (
+        workflows.load_tilde_u_training_approx_report_data
+        is training_reports.load_tilde_u_training_approx_report_data
+    )
+    assert (
+        workflows.summarize_tilde_u_training_approx
+        is training_reports.summarize_tilde_u_training_approx
+    )
+    assert (
+        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS
+        is training_reports.TILDE_U_TRAINING_APPROX_PLOT_SPECS
+    )
 
 
 def test_actual_training_requires_noise_N_when_not_swept():

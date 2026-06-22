@@ -10,12 +10,8 @@ tables for notebooks.
 """
 
 from datetime import datetime
-from io import BytesIO
-import json
-from pathlib import Path
 from time import perf_counter
 from typing import Callable, List, Sequence, Tuple
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -33,12 +29,10 @@ from .blocks import (
     svd_probability_blocks,
 )
 from .linalg import (
-    distribution_summary,
     frobnorm,
     loglog_fit,
     opnorm,
     psd_solve,
-    quantile_suffix,
     symmetrize,
 )
 from .noise import shot_noise_matrix
@@ -60,16 +54,57 @@ from .training import (
     ResolvedTest,
     TildeUDiagnostics,
     TildeUTrainingApproxStudySpec,
-    _povm_kind_from_spec,
     _required_noise_N,
-    _resolve_test_state_request,
-    _training_state_count_from_spec,
     estimate_actual_training_mse,
     estimate_actual_training_mse_target_average,
     leading_training_bias_variance_terms,
     leading_training_bias_variance_terms_target_average,
     tilde_u_correction_operator_diagnostics,
-    with_training_sweep_value,
+)
+from .training_reports import (
+    TILDE_U_TRAINING_APPROX_METRIC_COLS,
+    TILDE_U_TRAINING_APPROX_PLOT_SPECS,
+    TILDE_U_TRAINING_APPROX_PLOTS,
+    _array_payload,
+    _array_from_payload,
+    _as_tilde_u_training_approx_report_data,
+    _noncolliding_output_path,
+    _normalize_tilde_u_report_metadata,
+    _portable_dataframe_bytes,
+    _povm_descriptor,
+    _read_portable_dataframe_bytes,
+    _save_tilde_u_training_approx_report_data,
+    _save_tilde_u_training_approx_report_zip,
+    _selector_descriptor,
+    _state_batch_descriptor,
+    _target_descriptor,
+    _test_descriptor,
+    _tilde_u_configs_from_study,
+    _tilde_u_context_average_label,
+    _tilde_u_context_povm_label,
+    _tilde_u_context_quantile_label,
+    _tilde_u_povm_label_from_descriptor,
+    _tilde_u_report_output_path,
+    _tilde_u_report_rank_from_metadata,
+    _tilde_u_report_summary_quantiles,
+    _tilde_u_report_x_col,
+    _tilde_u_saved_raw_df,
+    _tilde_u_saved_report_plot_raw_df,
+    _tilde_u_slope_group_cols,
+    _tilde_u_study_sweep_values,
+    _tilde_u_study_x_col,
+    _tilde_u_training_approx_context_metadata,
+    _tilde_u_training_approx_plots_from_keys,
+    _tilde_u_training_approx_report_metadata,
+    _tilde_u_training_context_title_suffix,
+    _tilde_u_training_contextualized_plots,
+    _training_states_descriptor,
+    fit_tilde_u_training_approx_slopes,
+    load_tilde_u_training_approx_report_data,
+    plot_saved_training_data,
+    render_tilde_u_training_approx_report,
+    summarize_saved_training_data,
+    summarize_tilde_u_training_approx,
 )
 from .trials import run_trials, summarize_trials
 
@@ -468,8 +503,6 @@ SCHUR_COMPLEMENT_METRIC_COLS = [
 
 SCHUR_COMPLEMENT_SUMMARY_COLS = [
     "ntr",
-    "p_kernel",
-    "q",
     "empirical_schur_op_median",
     "limit_approx_error_op_median",
     "xi11_approx_error_op_median",
@@ -494,6 +527,8 @@ def run_repeated_trials(
     seed_arg: str | None = "seed",
     verbose: bool = True,
     progress_fields: Sequence[str] = ("nout", "ntr"),
+    progress_kwargs: dict | None = None,
+    print_elapsed: bool = True,
     fail_soft: bool = False,
 ) -> pd.DataFrame:
     """
@@ -511,13 +546,15 @@ def run_repeated_trials(
 
     pbar = None
     if verbose and tqdm is not None:
-        pbar = tqdm(
-            total=total_steps,
-            desc="Running trials",
-            unit="trial",
-            leave=False,
-            dynamic_ncols=True,
-        )
+        tqdm_kwargs = {
+            "total": total_steps,
+            "desc": "Running trials",
+            "unit": "trial",
+            "leave": False,
+            "dynamic_ncols": True,
+        }
+        tqdm_kwargs.update(progress_kwargs or {})
+        pbar = tqdm(**tqdm_kwargs)
     elif verbose:
         print(f"Running {total_steps} trial(s)...")
 
@@ -534,7 +571,7 @@ def run_repeated_trials(
                 parts.append(f"{field}={value}")
 
             if pbar is not None and parts:
-                pbar.set_postfix_str(", ".join(parts), refresh=False)
+                pbar.set_postfix_str(", ".join(parts), refresh=True)
 
             for trial in range(trials):
                 trial_seed = int(master_rng.integers(0, 2**32 - 1))
@@ -574,7 +611,7 @@ def run_repeated_trials(
             pbar.close()
         elif verbose and total_steps > 0:
             print("\r" + " " * 60 + "\r", end="", flush=True)
-        if verbose:
+        if verbose and print_elapsed:
             print(f"Elapsed time: {elapsed:.2f}s")
 
     return pd.DataFrame(rows)
@@ -654,11 +691,8 @@ def one_schur_complement_approx_trial(
 
     return {
         "d": d,
-        "r": blocks["r"],
         "nout": nout,
         "ntr": ntr,
-        "q": blocks["q"],
-        "p_kernel": p_kernel,
         "noise": noise,
         "empirical_schur_op": empirical_schur_op,
         "limit_approx_op": opnorm(limit_approx),
@@ -700,7 +734,7 @@ def summarize_schur_complement_approx(
     """
     Summarize Schur-complement approximation trials by parameter setting.
     """
-    group_cols = ["d", "r", "nout", "ntr", "q", "p_kernel", "noise"]
+    group_cols = ["d", "nout", "ntr", "noise"]
     rows = []
 
     for key, group in raw_df.groupby(group_cols, dropna=False):
@@ -718,7 +752,7 @@ def summarize_schur_complement_approx(
 
         rows.append(row)
 
-    summary = pd.DataFrame(rows).sort_values("p_kernel").reset_index(drop=True)
+    summary = pd.DataFrame(rows).sort_values("ntr").reset_index(drop=True)
     summary["limit_approx_ok_median"] = (
         summary["limit_relative_error_median"] <= relative_error_threshold
     )
@@ -777,7 +811,7 @@ def run_schur_complement_approx_experiment(
     if make_plots and plot_specs:
         plot_summary_series(
             summary_df,
-            x_col="p_kernel",
+            x_col="ntr",
             plots=plot_specs,
             thresholds={"relative_error": relative_error_threshold},
         )
@@ -802,11 +836,8 @@ def _tilde_u_trial_row(
     eps = 1e-15
     row = {
         "d": d,
-        "r": blocks["r"],
         "nout": blocks["U1"].shape[0],
         "ntr": ntr,
-        "q": blocks["q"],
-        "p_kernel": blocks["p_kernel"],
         "N": N,
         "noise": noise,
         "test_state": test.mode,
@@ -879,284 +910,11 @@ def one_tilde_u_training_approx_trial_from_spec(
     )
 
 
-TILDE_U_TRAINING_APPROX_METRIC_COLS = [
-    "C22_inv_C21_op",
-    "correction_op",
-    "C22_lambda_min",
-    "C22_cond",
-    "leading_bias_sq_exact",
-    "leading_bias_sq_identity",
-    "leading_var_exact",
-    "leading_var_identity",
-    "leading_mse_exact",
-    "leading_mse_identity",
-    "actual_mse",
-    "actual_bias_sq",
-    "actual_variance",
-    "bias_sq_identity_over_exact",
-    "var_identity_over_exact",
-    "mse_identity_over_exact",
-    "actual_over_leading_exact",
-    "actual_over_leading_identity",
-    "leading_exact_relative_error",
-    "leading_identity_relative_error",
-]
-
-TILDE_U_TRAINING_APPROX_PLOT_SPECS = {
-    "correction": (
-        [
-            ("C22_inv_C21_op", r"$C_{22}^{-1}C_{21}$"),
-            ("correction_op", r"$U_2 C_{22}^{-1} C_{21} U_1^T$"),
-        ],
-        "Size of the C22 correction",
-        "operator norm",
-    ),
-    "bias": (
-        [
-            ("leading_bias_sq_exact", "with correction"),
-            ("leading_bias_sq_identity", r"$\tilde U U_1^T = I$"),
-        ],
-        "Leading training squared bias",
-        "mean test squared bias, leading formula",
-    ),
-    "variance": (
-        [
-            ("leading_var_exact", "with correction"),
-            ("leading_var_identity", r"$\tilde U U_1^T = I$"),
-        ],
-        "Leading training variance",
-        "mean test variance, leading formula",
-    ),
-    "leading_mse": (
-        [
-            ("leading_mse_exact", "with correction"),
-            ("leading_mse_identity", r"$\tilde U U_1^T = I$"),
-        ],
-        "Leading bias-plus-variance prediction",
-        "leading squared bias + leading variance",
-    ),
-    "mse": (
-        [
-            ("leading_mse_exact", r"leading, full $\tilde U U_1^T$"),
-            ("leading_mse_identity", r"leading, $\tilde U U_1^T = I$"),
-            ("actual_mse", "true MSE"),
-        ],
-        "MSE: true vs leading approximation",
-        "MSE",
-    ),
-    "mse_ratio": (
-        [("mse_identity_over_exact", r"identity / corrected")],
-        "Effect of dropping the C22 correction in the leading MSE",
-        "identity leading MSE / corrected leading MSE",
-    ),
-    "actual_ratio": (
-        [
-            ("actual_over_leading_exact", "actual / corrected leading"),
-            ("actual_over_leading_identity", "actual / identity leading"),
-        ],
-        "Actual MSE divided by leading prediction",
-        "actual MSE / leading MSE",
-    ),
-    "relative_error": (
-        [
-            ("leading_exact_relative_error", "corrected leading"),
-            ("leading_identity_relative_error", "identity leading"),
-        ],
-        "Relative error of leading prediction",
-        "|leading MSE - numerical MSE| / numerical MSE",
-    ),
-}
-TILDE_U_TRAINING_APPROX_PLOTS = list(TILDE_U_TRAINING_APPROX_PLOT_SPECS.values())
-
-
-def _tilde_u_training_approx_plots_from_keys(
-    plots: Sequence[str] | str | None,
-) -> list[tuple]:
-    """
-    Resolve short plot keys from TildeUTrainingApproxStudySpec into plot specs.
-    """
-    if plots is None:
-        return []
-    if isinstance(plots, str):
-        keys = (plots,)
-    else:
-        keys = tuple(plots)
-
-    if not keys or "all" in keys:
-        return TILDE_U_TRAINING_APPROX_PLOTS
-
-    unknown = tuple(key for key in keys if key not in TILDE_U_TRAINING_APPROX_PLOT_SPECS)
-    if unknown:
-        available = ", ".join(("all", *TILDE_U_TRAINING_APPROX_PLOT_SPECS))
-        raise ValueError(f"Unknown tilde-U plot key(s): {unknown}. Available keys: {available}.")
-
-    return [TILDE_U_TRAINING_APPROX_PLOT_SPECS[key] for key in keys]
-
-
-def summarize_tilde_u_training_approx(
-    raw_df: pd.DataFrame,
-    *,
-    quantiles: Sequence[float] = (0.25, 0.75),
-    group_cols: Sequence[str] = (
-        "d",
-        "r",
-        "nout",
-        "ntr",
-        "q",
-        "p_kernel",
-        "N",
-        "noise",
-        "test_state",
-        "target_kind",
-        "target_average",
-        "target_normalization",
-    ),
-) -> pd.DataFrame:
-    """
-    Summarize tilde-U approximation trials with configurable quantiles.
-    """
-    rows = []
-    ok = raw_df[~raw_df.get("failed", False).astype(bool)].copy() if "failed" in raw_df else raw_df
-    active_group_cols = tuple(col for col in group_cols if col in ok.columns)
-
-    for key, group in ok.groupby(list(active_group_cols), dropna=False):
-        if not isinstance(key, tuple):
-            key = (key,)
-        row = dict(zip(active_group_cols, key))
-        row["trials"] = len(group)
-        if "actual_noise_trials" in group.columns:
-            row["actual_noise_trials"] = int(group["actual_noise_trials"].iloc[0])
-        if "num_test_points" in group.columns:
-            row["num_test_points"] = int(group["num_test_points"].iloc[0])
-        if "target_scale" in group.columns:
-            row["target_scale_mean"] = float(group["target_scale"].mean())
-        if "C22_kept_rank" in group.columns:
-            row["C22_kept_rank_min"] = int(group["C22_kept_rank"].min())
-
-        for col in TILDE_U_TRAINING_APPROX_METRIC_COLS:
-            if col not in group.columns:
-                continue
-            stats = distribution_summary(group[col].to_numpy(dtype=float), quantiles=quantiles)
-            for name, value in stats.items():
-                row[f"{col}_{name}"] = value
-
-        rows.append(row)
-
-    return pd.DataFrame(rows).sort_values(list(active_group_cols)).reset_index(drop=True)
-
-
-def fit_tilde_u_training_approx_slopes(
-    summary_df: pd.DataFrame,
-    *,
-    x_col: str = "p_kernel",
-    ycols: Sequence[str] = (
-        "C22_inv_C21_op_median",
-        "correction_op_median",
-        "leading_mse_exact_median",
-        "leading_mse_identity_median",
-        "actual_mse_median",
-    ),
-    group_cols: Sequence[str] = ("d", "nout", "N", "noise"),
-) -> pd.DataFrame:
-    """
-    Fit log-log slopes for selected summarized tilde-U approximation quantities.
-    """
-    rows = []
-    grouped = summary_df.groupby(list(group_cols), dropna=False) if group_cols else [((), summary_df)]
-
-    for key, group in grouped:
-        key_tuple = key if isinstance(key, tuple) else (key,)
-        base = dict(zip(group_cols, key_tuple))
-
-        for ycol in ycols:
-            if ycol not in group.columns:
-                continue
-            slope, intercept = loglog_fit(group[x_col].to_numpy(dtype=float), group[ycol].to_numpy(dtype=float))
-            rows.append(
-                {
-                    **base,
-                    "x": x_col,
-                    "y": ycol,
-                    "slope": slope,
-                    "intercept": intercept,
-                    "law": f"{ycol} ~ {x_col}^{slope:.3f}" if np.isfinite(slope) else "insufficient data",
-                    "num_points": int(np.isfinite(group[ycol]).sum()),
-                }
-            )
-
-    return pd.DataFrame(rows)
-
-
-def _tilde_u_slope_group_cols(summary_df: pd.DataFrame, x_col: str) -> tuple[str, ...]:
-    excluded = {x_col}
-    if x_col in {"q", "nout"}:
-        excluded.update({"q", "nout"})
-    if x_col in {"p_kernel", "ntr"}:
-        excluded.update({"p_kernel", "ntr"})
-
-    candidates = (
-        "d",
-        "nout",
-        "N",
-        "noise",
-        "test_state",
-        "target_kind",
-        "target_average",
-        "target_normalization",
-    )
-    return tuple(
-        col for col in candidates
-        if col in summary_df.columns and col not in excluded
-    )
-
-
-def _tilde_u_study_x_col(study: TildeUTrainingApproxStudySpec) -> str:
-    if study.x_col is not None:
-        return study.x_col
-    elif study.sweep_col == "nout":
-        return "q"
-    elif study.sweep_col == "N":
-        return "N"
-    elif study.sweep_col == "ntr":
-        return "ntr"
-    else:
-        raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
-
-
-def _tilde_u_study_sweep_values(study: TildeUTrainingApproxStudySpec) -> tuple[int, ...]:
-    if study.sweep_values is not None:
-        return tuple(int(value) for value in study.sweep_values)
-    if study.sweep_col == "ntr":
-        count = _training_state_count_from_spec(study.base.data.train_states)
-        if count is None:
-            raise ValueError("ntr sweep_values are required when train_states has no fixed count.")
-        return (count,)
-    if study.sweep_col == "nout":
-        return (int(study.base.data.nout),)
-    if study.sweep_col == "N":
-        return (_required_noise_N(study.base.noise),)
-    raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
-
-
-def _tilde_u_configs_from_study(study: TildeUTrainingApproxStudySpec) -> list[dict]:
-    configs = []
-    for value in _tilde_u_study_sweep_values(study):
-        spec = with_training_sweep_value(study.base, study.sweep_col, value)
-        ntr = _training_state_count_from_spec(spec.data.train_states)
-        N = _required_noise_N(spec.noise)
-        configs.append(
-            {
-                "spec": spec,
-                "d": spec.data.d,
-                "nout": spec.data.nout,
-                "N": N,
-                **({} if ntr is None else {"ntr": ntr}),
-            }
-        )
-    return configs
-
 def run_tilde_u_training_approx_experiment(
     study: TildeUTrainingApproxStudySpec,
+    *,
+    progress_kwargs: dict | None = None,
+    print_elapsed: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Run raw and summarized trials for a tilde-U approximation study.
@@ -1176,6 +934,8 @@ def run_tilde_u_training_approx_experiment(
         rng_arg="rng",
         verbose=study.verbose,
         progress_fields=("d", "nout", "ntr", "N"),
+        progress_kwargs=progress_kwargs,
+        print_elapsed=print_elapsed,
         fail_soft=study.fail_soft,
     )
     summary_df = summarize_tilde_u_training_approx(
@@ -1185,314 +945,11 @@ def run_tilde_u_training_approx_experiment(
     return raw_df, summary_df
 
 
-def _save_tilde_u_training_approx_report_data(
-    output_file: str | Path,
-    *,
-    raw_df: pd.DataFrame,
-    metadata: dict,
-    overwrite: bool = False,
-) -> Path:
-    path = _tilde_u_report_output_path(output_file)
-    if not overwrite:
-        path = _noncolliding_output_path(path)
-    return _save_tilde_u_training_approx_report_zip(
-        path,
-        raw_df=raw_df,
-        metadata=metadata,
-    )
-
-
-def _tilde_u_report_output_path(output_file: str | Path) -> Path:
-    path = Path(output_file).expanduser()
-    if path.suffix == "":
-        path = path.with_suffix(".zip")
-    if path.suffix.lower() != ".zip":
-        raise ValueError("tilde-U report output_file must end in .zip.")
-    return path
-
-
-def _noncolliding_output_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for index in range(1, 10_000):
-        candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"Could not find an available output path for {path}.")
-
-
-def _portable_dataframe_bytes(df: pd.DataFrame) -> bytes:
-    portable = df.copy()
-    for col in portable.columns:
-        if isinstance(portable[col].dtype, pd.StringDtype):
-            portable[col] = portable[col].astype(object)
-    buffer = BytesIO()
-    portable.to_parquet(buffer, index=False, compression="zstd")
-    return buffer.getvalue()
-
-
-def _read_portable_dataframe_bytes(data: bytes) -> pd.DataFrame:
-    return pd.read_parquet(BytesIO(data))
-
-
-def _array_payload(value) -> dict:
-    array = np.asarray(value)
-    payload = {
-        "kind": "ndarray",
-        "dtype": str(array.dtype),
-        "shape": list(array.shape),
-    }
-    if np.iscomplexobj(array):
-        payload["real"] = np.real(array).tolist()
-        payload["imag"] = np.imag(array).tolist()
-    else:
-        payload["data"] = array.tolist()
-    return payload
-
-
-def _selector_descriptor(value):
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return _array_payload(value)
-    if isinstance(value, dict):
-        return {str(key): _selector_descriptor(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_selector_descriptor(item) for item in value]
-    return repr(value)
-
-
-def _povm_descriptor(povm) -> dict:
-    kind = _povm_kind_from_spec(povm)
-    if kind == "random_rank1":
-        descriptor = {"kind": "random_rank1"}
-        if isinstance(povm, dict):
-            for key in ("nout", "dim"):
-                if key in povm:
-                    descriptor[key] = int(povm[key])
-        return descriptor
-    if kind == "qubit_mub":
-        return {"kind": "qubit_mub", "nout": 6, "dim": 2}
-
-    if hasattr(povm, "effects"):
-        effects = np.asarray(povm.effects)
-        return {
-            "kind": "explicit",
-            "effects": _array_payload(effects),
-            **({"label": povm.label} if getattr(povm, "label", None) is not None else {}),
-        }
-
-    effects = povm.get("effects") if isinstance(povm, dict) else povm
-    return {"kind": "explicit", "effects": _array_payload(effects)}
-
-
-def _state_batch_descriptor(batch: QuantumStateBatch) -> dict:
-    descriptor = {
-        "kind": "explicit",
-        "states": _array_payload(batch.states),
-    }
-    if getattr(batch, "label", None) is not None:
-        descriptor["label"] = batch.label
-    return descriptor
-
-
-def _training_states_descriptor(train_states, *, dim: int) -> dict:
-    if isinstance(train_states, str):
-        if train_states.lower() == "haar_pure":
-            return {"kind": "haar_pure"}
-        return {"kind": train_states}
-    if isinstance(train_states, QuantumStateBatch):
-        return _state_batch_descriptor(train_states)
-    if isinstance(train_states, dict):
-        if "kind" in train_states:
-            kind = str(train_states["kind"]).lower()
-        elif "vectors" in train_states:
-            kind = "state_vectors"
-        else:
-            kind = "states"
-        if kind == "haar_pure":
-            descriptor = {"kind": "haar_pure"}
-            if "num_states" in train_states:
-                descriptor["num_states"] = int(train_states["num_states"])
-            return descriptor
-        if kind == "state_vectors":
-            batch = QuantumStateBatch.from_state_vectors(
-                train_states["vectors"],
-                dim=dim,
-                axis=str(train_states.get("axis", "auto")),
-                name="train_states",
-            )
-            return _state_batch_descriptor(batch)
-        if kind == "states":
-            batch = QuantumStateBatch.from_state_like(
-                train_states["states"],
-                dim=dim,
-                name="train_states",
-            )
-            return _state_batch_descriptor(batch)
-    batch = QuantumStateBatch.from_state_like(train_states, dim=dim, name="train_states")
-    return _state_batch_descriptor(batch)
-
-
-def _test_descriptor(test_state, *, dim: int) -> dict:
-    selector, fixed_state, num_points = _resolve_test_state_request(test_state)
-    if selector == "fixed_state":
-        batch = QuantumStateBatch.from_state_like(
-            fixed_state,
-            dim=dim,
-            name="test_state",
-        )
-        return {"kind": "fixed_state", "state": _array_payload(batch.states[0])}
-    descriptor = {"kind": selector}
-    if num_points is not None:
-        descriptor["num_points"] = int(num_points)
-    return descriptor
-
-
-def _target_descriptor(observable, *, dim: int, nout: int | None) -> dict:
-    if isinstance(observable, str):
-        return {"kind": observable.lower()}
-    target = np.asarray(observable)
-    if target.ndim == 1 and target.shape[0] == dim:
-        batch = QuantumStateBatch.from_state_like(
-            target,
-            dim=dim,
-            name="target_observable",
-        )
-        return {"kind": "pure_state", "operator": _array_payload(batch.states[0])}
-    if target.ndim == 1:
-        descriptor = {"kind": "outcome_weights", "weights": _array_payload(target)}
-        if nout is not None:
-            descriptor["nout"] = int(nout)
-        return descriptor
-    if target.ndim == 2:
-        return {"kind": "operator", "operator": _array_payload(target)}
-    return {"kind": type(observable).__name__, "value": _selector_descriptor(observable)}
-
-
-def _tilde_u_saved_raw_df(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFrame:
-    metric_cols = {
-        "leading_bias_sq_exact": "leading_bias_sq",
-        "leading_var_exact": "leading_variance",
-        "leading_bias_sq_identity": "identity_leading_bias_sq",
-        "leading_var_identity": "identity_leading_variance",
-        "actual_mse": "mse",
-        "actual_bias_sq": "bias_sq",
-        "actual_variance": "variance",
-    }
-    cols = ["trial"]
-    if sweep_col in raw_df.columns:
-        cols.append(sweep_col)
-    if "failed" in raw_df.columns and raw_df["failed"].fillna(False).any():
-        cols.append("failed")
-    cols.extend(col for col in metric_cols if col in raw_df.columns)
-    return raw_df.loc[:, cols].rename(columns=metric_cols)
-
-
-def _save_tilde_u_training_approx_report_zip(
-    path: Path,
-    *,
-    raw_df: pd.DataFrame,
-    metadata: dict,
-) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "tables": {
-            "raw": "raw.parquet",
-        },
-        "metadata": "metadata.json",
-    }
-    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        archive.writestr("raw.parquet", _portable_dataframe_bytes(raw_df))
-        archive.writestr(
-            "metadata.json",
-            json.dumps(metadata, indent=2, sort_keys=True),
-        )
-    return path
-
-
-def load_tilde_u_training_approx_report_data(path: str | Path) -> dict:
-    """
-    Load data saved by run_tilde_u_training_approx_report.
-
-    Portable .zip reports store tables as Parquet and metadata as plain JSON,
-    so they are intended for moving between machines and pandas versions.
-    """
-    report_path = Path(path).expanduser()
-    if report_path.suffix.lower() == ".zip":
-        with ZipFile(report_path, "r") as archive:
-            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-            tables = manifest["tables"]
-            return {
-                "raw": _read_portable_dataframe_bytes(archive.read(tables["raw"])),
-                "metadata": json.loads(
-                    archive.read(manifest["metadata"]).decode("utf-8")
-                ),
-            }
-    raise ValueError("tilde-U report path must end in .zip.")
-
-
-def _tilde_u_training_approx_report_metadata(
-    study: TildeUTrainingApproxStudySpec,
-    *,
-    started_at: datetime,
-    completed_at: datetime,
-    elapsed_seconds: float,
-) -> dict:
-    base = study.base
-    sweep_values = _tilde_u_study_sweep_values(study)
-    data = {
-        "d": int(base.data.d),
-        "nout": None if base.data.nout is None else int(base.data.nout),
-        "povm": _povm_descriptor(base.data.povm),
-        "train_states": _training_states_descriptor(
-            base.data.train_states,
-            dim=int(base.data.d),
-        ),
-        "train_state_count": _training_state_count_from_spec(base.data.train_states),
-    }
-    target = {
-        "observable": _target_descriptor(
-            base.target.observable,
-            dim=int(base.data.d),
-            nout=base.data.nout,
-        ),
-    }
-    if base.target.normalization != "none":
-        target["normalization"] = base.target.normalization
-    noise = {
-        "noise": base.noise.noise,
-        "N": None if base.noise.N is None else int(base.noise.N),
-        "actual_noise_trials": int(base.noise.actual_noise_trials),
-    }
-    if base.noise.lstsq_rcond is not None:
-        noise["lstsq_rcond"] = float(base.noise.lstsq_rcond)
-    numerics = {
-        "rank": None if base.numerics.rank is None else int(base.numerics.rank),
-        "rcond": float(base.numerics.rcond),
-        "ridge": float(base.numerics.ridge),
-    }
-    return {
-        "created_at": started_at.isoformat(),
-        "completed_at": completed_at.isoformat(),
-        "elapsed_seconds": float(elapsed_seconds),
-        "sweep_col": study.sweep_col,
-        "sweep_values": list(sweep_values),
-        "repetitions": study.repetitions,
-        "seed": study.seed,
-        "data": data,
-        "target": target,
-        "test": {"state": _test_descriptor(base.test.state, dim=int(base.data.d))},
-        "noise": noise,
-        "numerics": numerics,
-    }
-
-
 def run_tilde_u_training_approx_report(
     study: TildeUTrainingApproxStudySpec,
+    *,
+    progress_kwargs: dict | None = None,
+    quiet: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Notebook-friendly report for a tilde-U approximation study.
@@ -1502,7 +959,11 @@ def run_tilde_u_training_approx_report(
 
     started_at = datetime.now().astimezone()
     start_time = perf_counter()
-    raw_df, summary_df = run_tilde_u_training_approx_experiment(study)
+    raw_df, summary_df = run_tilde_u_training_approx_experiment(
+        study,
+        progress_kwargs=progress_kwargs,
+        print_elapsed=not quiet,
+    )
     resolved_x_col = _tilde_u_study_x_col(study)
     slopes_df = fit_tilde_u_training_approx_slopes(
         summary_df,
@@ -1512,38 +973,34 @@ def run_tilde_u_training_approx_report(
     )
     elapsed_seconds = perf_counter() - start_time
     completed_at = datetime.now().astimezone()
+    metadata = _tilde_u_training_approx_report_metadata(
+        study,
+        started_at=started_at,
+        completed_at=completed_at,
+        elapsed_seconds=elapsed_seconds,
+    )
 
     if study.output_file is not None:
         saved_path = _save_tilde_u_training_approx_report_data(
             study.output_file,
             raw_df=_tilde_u_saved_raw_df(raw_df, sweep_col=study.sweep_col),
-            metadata=_tilde_u_training_approx_report_metadata(
-                study,
-                started_at=started_at,
-                completed_at=completed_at,
-                elapsed_seconds=elapsed_seconds,
-            ),
+            metadata=metadata,
             overwrite=study.overwrite,
         )
-        if study.verbose:
+        if study.verbose and not quiet:
             print(f"Saved tilde-U report data to {saved_path}")
 
-    if study.show_summary:
-        display(summary_df)
-
-    if study.show_slopes:
-        display(slopes_df)
-
-    if study.make_plots:
-        plots = _tilde_u_training_approx_plots_from_keys(study.plots)
-        plot_grouped_mean_median_quantile_summary(
-            summary_df,
-            x_col=resolved_x_col,
-            plots=plots,
-            quantile_band=study.quantile_band,
-            logx=True,
-            logy=True,
-        )
+    render_tilde_u_training_approx_report(
+        summary_df,
+        slopes_df,
+        metadata=metadata,
+        x_col=resolved_x_col,
+        plots=study.plots,
+        quantile_band=study.quantile_band,
+        show_summary=study.show_summary,
+        show_slopes=study.show_slopes,
+        make_plots=study.make_plots,
+    )
 
     return raw_df, summary_df, slopes_df
 
@@ -1601,11 +1058,8 @@ def one_schur_correction_trial(
 
     return {
         "d": d,
-        "r": blocks["r"],
         "nout": nout,
         "ntr": ntr,
-        "q": blocks["q"],
-        "p_kernel": blocks["p_kernel"],
         "Nshots": Nshots,
         "noise": noise,
         "term_op": opnorm(term),
@@ -1629,7 +1083,7 @@ def summarize_schur_correction_trials(raw_df: pd.DataFrame) -> pd.DataFrame:
     """
     Summarize repeated Schur-correction trials by parameter setting.
     """
-    group_cols = ["d", "r", "nout", "ntr", "q", "p_kernel", "Nshots", "noise"]
+    group_cols = ["d", "nout", "ntr", "Nshots", "noise"]
 
     summary = (
         raw_df
@@ -1654,13 +1108,12 @@ def summarize_schur_correction_trials(raw_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values(["nout", "ntr"])
     )
 
-    summary["q_over_p"] = summary["q"] / summary["p_kernel"]
     return summary
 
 
 def fit_schur_correction_summary_slopes(
     summary_df: pd.DataFrame,
-    xcol: str = "q",
+    xcol: str = "nout",
     ycols: Sequence[str] = (
         "term_op_median",
         "Gamma_trace_median",
@@ -1744,7 +1197,7 @@ def run_schur_correction_scaling_experiment(
     ok = raw_df[~raw_df["failed"].fillna(False)].copy()
 
     summary_df = summarize_schur_correction_trials(ok)
-    slopes_df = fit_schur_correction_summary_slopes(summary_df, xcol="q")
+    slopes_df = fit_schur_correction_summary_slopes(summary_df, xcol="nout")
 
     return raw_df, summary_df, slopes_df
 
@@ -1765,7 +1218,7 @@ def run_schur_correction_report(
     ridge: float = 0.0,
     rank: int | None = None,
     verbose: bool = True,
-    xcol: str = "q",
+    xcol: str = "nout",
     ycols: Tuple[str, ...] = (
         "term_op_median",
         "Gamma_trace_median",
@@ -1784,8 +1237,8 @@ def run_schur_correction_report(
         if ntr_values is None:
             ntr_values = (128, 256, 512, 1024, 2048, 4096)
         nout_values = [nout] * len(ntr_values)
-        if xcol == "q":
-            xcol = "p_kernel"
+        if xcol == "nout":
+            xcol = "ntr"
     elif sweep_col != "nout":
         raise ValueError("sweep_col must be 'nout' or 'ntr'.")
 

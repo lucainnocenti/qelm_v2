@@ -9,10 +9,12 @@ from qelm import (
     generate_haar_random_isometry,
     generate_haar_random_kets,
     generate_haar_random_pure_dms,
+    generate_qubit_mub_povm,
     generate_random_rank1_povm,
     haar_probability_moments_from_isometry,
     probability_matrix_from_povm_states,
     probability_vector_from_povm_state,
+    ket2dm,
     set_default_rng,
     validate_probability_matrix,
 )
@@ -64,6 +66,14 @@ def test_probability_vector_from_povm_state_accepts_vector_and_density_matrix():
     np.testing.assert_allclose(from_density, from_vector, atol=1e-12)
 
 
+def test_pure_state_density_matrix_normalizes_vector():
+    rho = ket2dm([2.0, 2.0j])
+
+    expected = density([1.0, 1.0j])
+    np.testing.assert_allclose(rho, expected, atol=1e-12)
+    np.testing.assert_allclose(np.trace(rho), 1.0, atol=1e-12)
+
+
 def test_povm_effects_probability_vector_matches_probability_matrix_column():
     rng = np.random.default_rng(123)
     povm = POVM.random_isometry(nout=5, dim=2, rng=rng)
@@ -98,6 +108,47 @@ def test_four_outcome_qubit_povm_probability_matrix():
         ]
     )
     assert P.shape == (4, 4)
+    np.testing.assert_allclose(P, expected, atol=1e-12)
+    validate_probability_matrix(P)
+
+
+def test_generate_qubit_mub_povm_is_complete_six_outcome_povm():
+    povm = generate_qubit_mub_povm()
+
+    assert povm.shape == (6, 2, 2)
+    np.testing.assert_allclose(povm, povm.conj().transpose(0, 2, 1), atol=1e-12)
+    np.testing.assert_allclose(np.sum(povm, axis=0), np.eye(2), atol=1e-12)
+
+    for effect in povm:
+        evals = np.linalg.eigvalsh(effect)
+        np.testing.assert_allclose(evals, np.array([0.0, 1.0 / 3.0]), atol=1e-12)
+
+
+def test_generate_qubit_mub_povm_probability_matrix_for_own_basis_states():
+    povm = generate_qubit_mub_povm()
+    states = np.stack(
+        [
+            density([1, 0]),
+            density([0, 1]),
+            density([1, 1]),
+            density([1, -1]),
+            density([1, 1j]),
+            density([1, -1j]),
+        ]
+    )
+
+    P = probability_matrix_from_povm_states(povm, states)
+
+    expected = np.array(
+        [
+            [1 / 3, 0, 1 / 6, 1 / 6, 1 / 6, 1 / 6],
+            [0, 1 / 3, 1 / 6, 1 / 6, 1 / 6, 1 / 6],
+            [1 / 6, 1 / 6, 1 / 3, 0, 1 / 6, 1 / 6],
+            [1 / 6, 1 / 6, 0, 1 / 3, 1 / 6, 1 / 6],
+            [1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 3, 0],
+            [1 / 6, 1 / 6, 1 / 6, 1 / 6, 0, 1 / 3],
+        ]
+    )
     np.testing.assert_allclose(P, expected, atol=1e-12)
     validate_probability_matrix(P)
 

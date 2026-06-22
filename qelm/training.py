@@ -913,6 +913,22 @@ def _validate_qubit_mub_povm_spec_for_config(
         raise ValueError(f"Qubit MUB POVM spec has d={spec_dim}, expected 2.")
 
 
+def _explicit_povm_label_from_spec(povm) -> str:
+    if isinstance(povm, POVM):
+        label = povm.label
+    elif isinstance(povm, dict):
+        label = povm.get("label")
+    else:
+        label = None
+
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError(
+            "Explicit POVM specs require a non-empty label. Pass a POVM with "
+            "label set, or a dictionary like {'effects': effects, 'label': 'my_povm'}."
+        )
+    return label.strip()
+
+
 def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> POVM:
     kind = _povm_kind_from_spec(povm)
     if kind == RANDOM_POVM_KIND:
@@ -932,12 +948,14 @@ def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> P
             raise ValueError(f"Explicit POVM has nout={povm.nout}, but the config has nout={nout}.")
         if povm.dim != int(dim):
             raise ValueError(f"Explicit POVM has dimension d={povm.dim}, but the config has d={dim}.")
+        _explicit_povm_label_from_spec(povm)
         return povm
 
+    label = _explicit_povm_label_from_spec(povm)
     effects = povm
     if isinstance(povm, dict):
         effects = povm.get("effects")
-    return POVM.from_effects(effects, dim=dim, nout=nout)
+    return POVM.from_effects(effects, dim=dim, nout=nout, label=label)
 
 
 def _context_from_dataset(dataset: QELMQuantumDataset) -> QELMTrainingContext:

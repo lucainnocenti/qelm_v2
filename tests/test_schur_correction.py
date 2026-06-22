@@ -47,6 +47,8 @@ def _tilde_u_study(
 ) -> TildeUTrainingApproxStudySpec:
     if train_states is None:
         train_states = {"kind": "haar_pure", "num_states": ntr}
+    if isinstance(povm, np.ndarray):
+        povm = {"effects": povm, "label": "test_povm"}
     base = QELMTrainingSpec(
         data=QELMDataSpec(
             d=d,
@@ -145,7 +147,7 @@ def test_run_tilde_u_training_approx_experiment_accepts_povm_dictionary_effects(
     effects = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
 
     raw, summary = _run_tilde_u(
-        povm={"effects": effects},
+        povm={"effects": effects, "label": "test_povm"},
         repetitions=1,
         actual_noise_trials=1,
     )
@@ -486,9 +488,9 @@ def test_one_schur_correction_trial_seeded_regression():
         seed=123,
     )
 
-    assert row["r"] == 4
-    assert row["q"] == 4
-    assert row["p_kernel"] == 16
+    assert "r" not in row
+    assert "q" not in row
+    assert "p_kernel" not in row
     assert row["C22_kept_rank"] == 4
     assert row["P_numerical_rank"] == 4
 
@@ -516,17 +518,14 @@ def test_run_schur_correction_scaling_experiment_shapes():
 
     expected_summary_columns = {
         "d",
-        "r",
         "nout",
         "ntr",
-        "q",
-        "p_kernel",
         "term_op_median",
         "Gamma_trace_median",
         "C22_lambda_min_median",
-        "q_over_p",
     }
     assert expected_summary_columns <= set(summary.columns)
+    assert {"r", "q", "p_kernel", "q_over_p"}.isdisjoint(summary.columns)
 
 
 def test_run_schur_complement_approx_experiment_shapes():
@@ -547,11 +546,8 @@ def test_run_schur_complement_approx_experiment_shapes():
 
     expected_summary_columns = {
         "d",
-        "r",
         "nout",
         "ntr",
-        "q",
-        "p_kernel",
         "empirical_schur_op_median",
         "limit_relative_error_median",
         "xi11_relative_error_median",
@@ -559,6 +555,7 @@ def test_run_schur_complement_approx_experiment_shapes():
         "xi11_approx_ok_median",
     }
     assert expected_summary_columns <= set(summary.columns)
+    assert {"r", "q", "p_kernel"}.isdisjoint(summary.columns)
 
 
 def test_run_schur_correction_report_ntr_shapes_without_output():

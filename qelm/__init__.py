@@ -94,11 +94,16 @@ from .training import (
     tilde_u_correction_operator_diagnostics,
 )
 from .trials import one_trial_diagnostics, run_trials, summarize_trials, theoretical_predictors
+from .training_reports import (
+    fit_tilde_u_training_approx_slopes,
+    load_tilde_u_training_approx_report_data,
+    plot_saved_training_data,
+    summarize_saved_training_data,
+    summarize_tilde_u_training_approx,
+)
 from .workflows import (
     fit_random_quantum_scaling_laws,
     fit_schur_correction_summary_slopes,
-    fit_tilde_u_training_approx_slopes,
-    load_tilde_u_training_approx_report_data,
     make_toy_P_for_sweep,
     make_toy_low_rank_probability_matrix,
     one_schur_complement_approx_trial,
@@ -115,7 +120,6 @@ from .workflows import (
     run_toy_low_rank_sweep,
     summarize_schur_complement_approx,
     summarize_schur_correction_trials,
-    summarize_tilde_u_training_approx,
 )
 
 __all__ = [
@@ -186,6 +190,7 @@ __all__ = [
     "plot_metric_vs_kappa",
     "plot_metric_vs_predictors",
     "plot_mean_median_quantile_summary",
+    "plot_saved_training_data",
     "plot_random_quantum_scaling",
     "plot_summary_series",
     "plot_sweep_diagnostics",
@@ -219,6 +224,7 @@ __all__ = [
     "summarize_schur_complement_approx",
     "summarize_schur_correction_trials",
     "summarize_tilde_u_training_approx",
+    "summarize_saved_training_data",
     "summarize_trials",
     "svd_probability_blocks",
     "symmetrize",
