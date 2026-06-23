@@ -1,33 +1,25 @@
-"""Tilde-U training report serialization, summaries, and plotting."""
+"""Tilde-U saved-report loading, summaries, and plotting."""
 
 from __future__ import annotations
 
-from datetime import datetime
 from io import BytesIO
 import json
 from pathlib import Path
 from typing import Sequence, Tuple
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
 
 from .linalg import distribution_summary, loglog_fit, quantile_suffix
 from .plotting import plot_grouped_mean_median_quantile_summary
-from .quantum import QuantumStateBatch, generate_qubit_mub_povm
-from .training import (
-    TildeUTrainingApproxStudySpec,
-    _povm_kind_from_spec,
-    _required_noise_N,
-    _resolve_test_state_request,
-    _training_state_count_from_spec,
-    with_training_sweep_value,
-)
+from .quantum import generate_qubit_mub_povm
 
 try:
     from IPython.display import display
 except ImportError:  # pragma: no cover - plain Python fallback
     def display(obj):
+        """Print objects when IPython display is unavailable."""
         print(obj)
 
 
@@ -120,7 +112,7 @@ TILDE_U_TRAINING_APPROX_PLOT_SPECS = {
 }
 TILDE_U_TRAINING_APPROX_PLOTS = list(TILDE_U_TRAINING_APPROX_PLOT_SPECS.values())
 
-_SAVED_METRIC_COLS = {
+TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = {
     "leading_bias_sq_exact": "leading_bias_sq",
     "leading_var_exact": "leading_variance",
     "leading_bias_sq_identity": "identity_leading_bias_sq",
@@ -129,6 +121,7 @@ _SAVED_METRIC_COLS = {
     "actual_bias_sq": "bias_sq",
     "actual_variance": "variance",
 }
+_SAVED_METRIC_COLS = TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS
 _COMPACT_TO_INTERNAL_METRIC_COLS = {
     compact: internal for internal, compact in _SAVED_METRIC_COLS.items()
 }
@@ -155,15 +148,14 @@ _LEGACY_REPORT_DIMENSION_COLS = ("r", "q", "p_kernel")
 
 
 def _drop_legacy_report_dimension_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove obsolete saved-report dimension columns before summarizing data."""
     return df.drop(columns=list(_LEGACY_REPORT_DIMENSION_COLS), errors="ignore")
 
 
 def _tilde_u_training_approx_plots_from_keys(
     plots: Sequence[str] | str | None,
 ) -> list[tuple]:
-    """
-    Resolve short plot keys from TildeUTrainingApproxStudySpec into plot specs.
-    """
+    """Resolve short plot keys from report options into concrete plot specs."""
     if plots is None:
         return []
     if isinstance(plots, str):
@@ -182,33 +174,8 @@ def _tilde_u_training_approx_plots_from_keys(
     return [TILDE_U_TRAINING_APPROX_PLOT_SPECS[key] for key in keys]
 
 
-def _tilde_u_training_approx_context_metadata(study: TildeUTrainingApproxStudySpec) -> dict:
-    base = study.base
-    return {
-        "sweep_col": study.sweep_col,
-        "data": {
-            "d": int(base.data.d),
-            "nout": None if base.data.nout is None else int(base.data.nout),
-            "povm": _povm_descriptor(base.data.povm),
-            "train_state_count": _training_state_count_from_spec(base.data.train_states),
-        },
-        "target": {
-            "observable": _target_descriptor(
-                base.target.observable,
-                dim=int(base.data.d),
-                nout=base.data.nout,
-            ),
-            "normalization": base.target.normalization,
-        },
-        "test": {"state": _test_descriptor(base.test.state, dim=int(base.data.d))},
-        "noise": {
-            "noise": base.noise.noise,
-            "N": None if base.noise.N is None else int(base.noise.N),
-        },
-    }
-
-
 def _tilde_u_context_povm_label(data: dict, sweep_col: str | None) -> str:
+    """Build the POVM label shown in contextualized tilde-U plot titles."""
     povm = data.get("povm", {})
     kind = str(povm.get("kind", "unknown"))
     label = _tilde_u_povm_label_from_descriptor(povm)
@@ -223,6 +190,7 @@ def _tilde_u_context_povm_label(data: dict, sweep_col: str | None) -> str:
 
 
 def _array_from_payload(payload: dict) -> np.ndarray:
+    """Decode an array payload stored in saved report metadata."""
     if payload.get("kind") != "ndarray":
         raise ValueError("Array payload kind must be 'ndarray'.")
     if "real" in payload and "imag" in payload:
@@ -233,6 +201,7 @@ def _array_from_payload(payload: dict) -> np.ndarray:
 
 
 def _tilde_u_povm_label_from_descriptor(povm: dict) -> str:
+    """Infer a human-readable POVM label from saved report metadata."""
     label = povm.get("label")
     if isinstance(label, str) and label.strip():
         return label.strip()
@@ -253,6 +222,7 @@ def _tilde_u_povm_label_from_descriptor(povm: dict) -> str:
 
 
 def _tilde_u_context_average_label(kind: object) -> str:
+    """Convert metadata selector kinds into compact plot-title labels."""
     kind = "unknown" if kind is None else str(kind)
     if kind in {"fixed_state", "operator", "pure_state", "outcome_weights", "explicit"}:
         return "fixed"
@@ -268,6 +238,7 @@ def _tilde_u_context_average_label(kind: object) -> str:
 def _tilde_u_context_quantile_label(
     quantile_band: tuple[float, float] | None,
 ) -> str | None:
+    """Format a quantile band for use in a tilde-U plot title."""
     if quantile_band is None:
         return None
     qlo, qhi = quantile_band
@@ -279,6 +250,7 @@ def _tilde_u_training_context_title_suffix(
     *,
     quantile_band: tuple[float, float] | None,
 ) -> str:
+    """Build the report-context suffix appended to saved and live MSE plots."""
     sweep_col = metadata.get("sweep_col")
     data = metadata.get("data", {})
     noise = metadata.get("noise", {})
@@ -320,6 +292,7 @@ def _tilde_u_training_contextualized_plots(
     *,
     title_suffix: str | None,
 ) -> list[tuple]:
+    """Attach report context to the MSE plot while preserving other plot specs."""
     if not title_suffix:
         return list(plots)
 
@@ -424,6 +397,7 @@ def fit_tilde_u_training_approx_slopes(
 
 
 def _tilde_u_slope_group_cols(summary_df: pd.DataFrame, x_col: str) -> tuple[str, ...]:
+    """Choose grouping columns for fitting tilde-U log-log slopes."""
     excluded = {x_col}
 
     candidates = (
@@ -442,280 +416,13 @@ def _tilde_u_slope_group_cols(summary_df: pd.DataFrame, x_col: str) -> tuple[str
     )
 
 
-def _tilde_u_study_x_col(study: TildeUTrainingApproxStudySpec) -> str:
-    if study.x_col is not None:
-        return study.x_col
-    elif study.sweep_col == "nout":
-        return "nout"
-    elif study.sweep_col == "N":
-        return "N"
-    elif study.sweep_col == "ntr":
-        return "ntr"
-    else:
-        raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
-
-
-def _tilde_u_study_sweep_values(study: TildeUTrainingApproxStudySpec) -> tuple[int, ...]:
-    if study.sweep_values is not None:
-        return tuple(int(value) for value in study.sweep_values)
-    if study.sweep_col == "ntr":
-        count = _training_state_count_from_spec(study.base.data.train_states)
-        if count is None:
-            raise ValueError("ntr sweep_values are required when train_states has no fixed count.")
-        return (count,)
-    if study.sweep_col == "nout":
-        return (int(study.base.data.nout),)
-    if study.sweep_col == "N":
-        return (_required_noise_N(study.base.noise),)
-    raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
-
-
-def _tilde_u_configs_from_study(study: TildeUTrainingApproxStudySpec) -> list[dict]:
-    configs = []
-    for value in _tilde_u_study_sweep_values(study):
-        spec = with_training_sweep_value(study.base, study.sweep_col, value)
-        ntr = _training_state_count_from_spec(spec.data.train_states)
-        N = _required_noise_N(spec.noise)
-        configs.append(
-            {
-                "spec": spec,
-                "d": spec.data.d,
-                "nout": spec.data.nout,
-                "N": N,
-                **({} if ntr is None else {"ntr": ntr}),
-            }
-        )
-    return configs
-
-def _save_tilde_u_training_approx_report_data(
-    output_file: str | Path,
-    *,
-    raw_df: pd.DataFrame,
-    metadata: dict,
-    overwrite: bool = False,
-) -> Path:
-    path = _tilde_u_report_output_path(output_file)
-    if not overwrite:
-        path = _noncolliding_output_path(path)
-    return _save_tilde_u_training_approx_report_zip(
-        path,
-        raw_df=raw_df,
-        metadata=metadata,
-    )
-
-
-def _tilde_u_report_output_path(output_file: str | Path) -> Path:
-    path = Path(output_file).expanduser()
-    if path.suffix == "":
-        path = path.with_suffix(".zip")
-    if path.suffix.lower() != ".zip":
-        raise ValueError("tilde-U report output_file must end in .zip.")
-    return path
-
-
-def _noncolliding_output_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for index in range(1, 10_000):
-        candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise RuntimeError(f"Could not find an available output path for {path}.")
-
-
-def _portable_dataframe_bytes(df: pd.DataFrame) -> bytes:
-    portable = df.copy()
-    for col in portable.columns:
-        if isinstance(portable[col].dtype, pd.StringDtype):
-            portable[col] = portable[col].astype(object)
-    buffer = BytesIO()
-    portable.to_parquet(buffer, index=False, compression="zstd")
-    return buffer.getvalue()
-
-
 def _read_portable_dataframe_bytes(data: bytes) -> pd.DataFrame:
+    """Read a Parquet table from a portable report archive."""
     return _drop_legacy_report_dimension_cols(pd.read_parquet(BytesIO(data)))
 
 
-def _array_payload(value) -> dict:
-    array = np.asarray(value)
-    payload = {
-        "kind": "ndarray",
-        "dtype": str(array.dtype),
-        "shape": list(array.shape),
-    }
-    if np.iscomplexobj(array):
-        payload["real"] = np.real(array).tolist()
-        payload["imag"] = np.imag(array).tolist()
-    else:
-        payload["data"] = array.tolist()
-    return payload
-
-
-def _selector_descriptor(value):
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, np.ndarray):
-        return _array_payload(value)
-    if isinstance(value, dict):
-        return {str(key): _selector_descriptor(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_selector_descriptor(item) for item in value]
-    return repr(value)
-
-
-def _povm_descriptor(povm) -> dict:
-    kind = _povm_kind_from_spec(povm)
-    if kind == "random_rank1":
-        descriptor = {"kind": "random_rank1", "label": "random_rank1"}
-        if isinstance(povm, dict):
-            if isinstance(povm.get("label"), str) and povm["label"].strip():
-                descriptor["label"] = povm["label"].strip()
-            for key in ("nout", "dim"):
-                if key in povm:
-                    descriptor[key] = int(povm[key])
-        return descriptor
-    if kind == "qubit_mub":
-        return {"kind": "qubit_mub", "label": "qubit_mub", "nout": 6, "dim": 2}
-
-    if hasattr(povm, "effects"):
-        effects = np.asarray(povm.effects)
-        label = getattr(povm, "label", None)
-        if not isinstance(label, str) or not label.strip():
-            raise ValueError("Explicit POVM metadata requires a non-empty label.")
-        return {
-            "kind": "explicit",
-            "label": label.strip(),
-            "effects": _array_payload(effects),
-        }
-
-    label = povm.get("label") if isinstance(povm, dict) else None
-    if not isinstance(label, str) or not label.strip():
-        raise ValueError("Explicit POVM metadata requires a non-empty label.")
-    effects = povm.get("effects") if isinstance(povm, dict) else povm
-    return {"kind": "explicit", "label": label.strip(), "effects": _array_payload(effects)}
-
-
-def _state_batch_descriptor(batch: QuantumStateBatch) -> dict:
-    descriptor = {
-        "kind": "explicit",
-        "states": _array_payload(batch.states),
-    }
-    if getattr(batch, "label", None) is not None:
-        descriptor["label"] = batch.label
-    return descriptor
-
-
-def _training_states_descriptor(train_states, *, dim: int) -> dict:
-    if isinstance(train_states, str):
-        if train_states.lower() == "haar_pure":
-            return {"kind": "haar_pure"}
-        return {"kind": train_states}
-    if isinstance(train_states, QuantumStateBatch):
-        return _state_batch_descriptor(train_states)
-    if isinstance(train_states, dict):
-        if "kind" in train_states:
-            kind = str(train_states["kind"]).lower()
-        elif "vectors" in train_states:
-            kind = "state_vectors"
-        else:
-            kind = "states"
-        if kind == "haar_pure":
-            descriptor = {"kind": "haar_pure"}
-            if "num_states" in train_states:
-                descriptor["num_states"] = int(train_states["num_states"])
-            return descriptor
-        if kind == "state_vectors":
-            batch = QuantumStateBatch.from_state_vectors(
-                train_states["vectors"],
-                dim=dim,
-                axis=str(train_states.get("axis", "auto")),
-                name="train_states",
-            )
-            return _state_batch_descriptor(batch)
-        if kind == "states":
-            batch = QuantumStateBatch.from_state_like(
-                train_states["states"],
-                dim=dim,
-                name="train_states",
-            )
-            return _state_batch_descriptor(batch)
-    batch = QuantumStateBatch.from_state_like(train_states, dim=dim, name="train_states")
-    return _state_batch_descriptor(batch)
-
-
-def _test_descriptor(test_state, *, dim: int) -> dict:
-    selector, fixed_state, num_points = _resolve_test_state_request(test_state)
-    if selector == "fixed_state":
-        batch = QuantumStateBatch.from_state_like(
-            fixed_state,
-            dim=dim,
-            name="test_state",
-        )
-        return {"kind": "fixed_state", "state": _array_payload(batch.states[0])}
-    descriptor = {"kind": selector}
-    if num_points is not None:
-        descriptor["num_points"] = int(num_points)
-    return descriptor
-
-
-def _target_descriptor(observable, *, dim: int, nout: int | None) -> dict:
-    if isinstance(observable, str):
-        return {"kind": observable.lower()}
-    target = np.asarray(observable)
-    if target.ndim == 1 and target.shape[0] == dim:
-        batch = QuantumStateBatch.from_state_like(
-            target,
-            dim=dim,
-            name="target_observable",
-        )
-        return {"kind": "pure_state", "operator": _array_payload(batch.states[0])}
-    if target.ndim == 1:
-        descriptor = {"kind": "outcome_weights", "weights": _array_payload(target)}
-        if nout is not None:
-            descriptor["nout"] = int(nout)
-        return descriptor
-    if target.ndim == 2:
-        return {"kind": "operator", "operator": _array_payload(target)}
-    return {"kind": type(observable).__name__, "value": _selector_descriptor(observable)}
-
-
-def _tilde_u_saved_raw_df(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFrame:
-    cols = ["trial"]
-    if sweep_col in raw_df.columns:
-        cols.append(sweep_col)
-    if "failed" in raw_df.columns and raw_df["failed"].fillna(False).any():
-        cols.append("failed")
-    cols.extend(col for col in _SAVED_METRIC_COLS if col in raw_df.columns)
-    return raw_df.loc[:, cols].rename(columns=_SAVED_METRIC_COLS)
-
-
-def _save_tilde_u_training_approx_report_zip(
-    path: Path,
-    *,
-    raw_df: pd.DataFrame,
-    metadata: dict,
-) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "tables": {
-            "raw": "raw.parquet",
-        },
-        "metadata": "metadata.json",
-    }
-    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        archive.writestr("raw.parquet", _portable_dataframe_bytes(raw_df))
-        archive.writestr(
-            "metadata.json",
-            json.dumps(metadata, indent=2, sort_keys=True),
-        )
-    return path
-
-
 def _normalize_tilde_u_report_metadata(metadata: dict) -> dict:
+    """Normalize saved metadata and repair labels missing from older reports."""
     normalized = json.loads(json.dumps(metadata))
     povm = normalized.get("data", {}).get("povm")
     if isinstance(povm, dict):
@@ -749,6 +456,7 @@ def load_tilde_u_training_approx_report_data(path: str | Path) -> dict:
 
 
 def _as_tilde_u_training_approx_report_data(report: str | Path | dict) -> dict:
+    """Normalize a report path or loaded report dict to raw data plus metadata."""
     if isinstance(report, (str, Path)):
         return load_tilde_u_training_approx_report_data(report)
     if not isinstance(report, dict) or "raw" not in report or "metadata" not in report:
@@ -759,19 +467,6 @@ def _as_tilde_u_training_approx_report_data(report: str | Path | dict) -> dict:
     report_as_dict = dict(report)
     report_as_dict["metadata"] = _normalize_tilde_u_report_metadata(report["metadata"])
     return report_as_dict
-
-
-def _tilde_u_report_rank_from_metadata(metadata: dict) -> int | None:
-    numerics = metadata.get("numerics", {})
-    rank = numerics.get("rank")
-    if rank is not None:
-        return int(rank)
-
-    data = metadata.get("data", {})
-    d = data.get("d")
-    if d is None:
-        return None
-    return int(d) ** 2
 
 
 def _tilde_u_report_x_col(
@@ -797,6 +492,7 @@ def _tilde_u_report_summary_quantiles(
     quantiles: Sequence[float] | None,
     quantile_band: tuple[float, float] | None,
 ) -> tuple[float, ...]:
+    """Combine summary quantiles with the plotted quantile band."""
     values = [] if quantiles is None else [float(q) for q in quantiles]
     if quantiles is None:
         values.extend((0.25, 0.75))
@@ -806,6 +502,7 @@ def _tilde_u_report_summary_quantiles(
 
 
 def _tilde_u_saved_report_plot_raw_df(report_data: dict) -> pd.DataFrame:
+    """Restore compact saved raw data to the columns expected by plot helpers."""
     raw_df = _drop_legacy_report_dimension_cols(report_data["raw"]).copy()
     metadata = report_data.get("metadata", {})
 
@@ -837,14 +534,17 @@ def _tilde_u_saved_report_plot_raw_df(report_data: dict) -> pd.DataFrame:
 
 
 def _has_columns(df: pd.DataFrame, cols: Sequence[str]) -> bool:
+    """Return whether a DataFrame has all requested columns."""
     return set(cols) <= set(df.columns)
 
 
 def _safe_denominator(values) -> np.ndarray:
+    """Clamp denominators away from zero for derived ratio metrics."""
     return np.maximum(np.asarray(values, dtype=float), _EPS)
 
 
 def _add_derived_saved_report_metrics(raw_df: pd.DataFrame) -> None:
+    """Add derived MSE, ratio, and relative-error columns to saved raw data."""
     for col, parts in _ADDITIVE_METRIC_COLS.items():
         if col not in raw_df.columns and _has_columns(raw_df, parts):
             raw_df[col] = sum(raw_df[part] for part in parts)
@@ -1011,59 +711,3 @@ def plot_saved_training_data(
     )
 
     return raw_df, summary_df, slopes_df
-
-
-def _tilde_u_training_approx_report_metadata(
-    study: TildeUTrainingApproxStudySpec,
-    *,
-    started_at: datetime,
-    completed_at: datetime,
-    elapsed_seconds: float,
-) -> dict:
-    base = study.base
-    sweep_values = _tilde_u_study_sweep_values(study)
-    data = {
-        "d": int(base.data.d),
-        "nout": None if base.data.nout is None else int(base.data.nout),
-        "povm": _povm_descriptor(base.data.povm),
-        "train_states": _training_states_descriptor(
-            base.data.train_states,
-            dim=int(base.data.d),
-        ),
-        "train_state_count": _training_state_count_from_spec(base.data.train_states),
-    }
-    target = {
-        "observable": _target_descriptor(
-            base.target.observable,
-            dim=int(base.data.d),
-            nout=base.data.nout,
-        ),
-    }
-    if base.target.normalization != "none":
-        target["normalization"] = base.target.normalization
-    noise = {
-        "noise": base.noise.noise,
-        "N": None if base.noise.N is None else int(base.noise.N),
-        "actual_noise_trials": int(base.noise.actual_noise_trials),
-    }
-    if base.noise.lstsq_rcond is not None:
-        noise["lstsq_rcond"] = float(base.noise.lstsq_rcond)
-    numerics = {
-        "rank": None if base.numerics.rank is None else int(base.numerics.rank),
-        "rcond": float(base.numerics.rcond),
-        "ridge": float(base.numerics.ridge),
-    }
-    return {
-        "created_at": started_at.isoformat(),
-        "completed_at": completed_at.isoformat(),
-        "elapsed_seconds": float(elapsed_seconds),
-        "sweep_col": study.sweep_col,
-        "sweep_values": list(sweep_values),
-        "repetitions": study.repetitions,
-        "seed": study.seed,
-        "data": data,
-        "target": target,
-        "test": {"state": _test_descriptor(base.test.state, dim=int(base.data.d))},
-        "noise": noise,
-        "numerics": numerics,
-    }
