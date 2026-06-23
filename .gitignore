@@ -1,3 +1,7 @@
+# explicit stuff to ignore
+gbstests.ipynb
+tests.ipynb
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
