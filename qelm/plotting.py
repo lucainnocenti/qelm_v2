@@ -328,7 +328,8 @@ def plot_grouped_mean_median_quantile_summary(
     show_band=True,
     xlim=None,
     ylim=None,
-    legend_outside=False
+    legend_outside=False,
+    ax=None,
 ):
     """
     Plot several summarized quantities on the same axes.
@@ -360,14 +361,21 @@ def plot_grouped_mean_median_quantile_summary(
         "ntr": r"$n_{\mathrm{tr}}$",
         "nout": r"$n_{\mathrm{out}}$",
     }
+    plots = list(plots)
+
+    if ax is not None and len(plots) != 1:
+        raise ValueError("ax can only be used when rendering exactly one plot")
 
     for series_specs, title, ylabel in plots:
         # fig, ax = plt.subplots(figsize=figsize)
-        legend_width = 1.8 if legend_outside else 0.0
-
-        fig, ax = plt.subplots(
-            figsize=(figsize[0] + legend_width, figsize[1])
-        )
+        if ax is None:
+            legend_width = 1.8 if legend_outside else 0.0
+            fig, plot_ax = plt.subplots(
+                figsize=(figsize[0] + legend_width, figsize[1])
+            )
+        else:
+            plot_ax = ax
+            fig = plot_ax.figure
         y_for_autoscale = []
 
         for base, label in series_specs:
@@ -383,7 +391,7 @@ def plot_grouped_mean_median_quantile_summary(
             if show_median:
                 y_med = summary_df[median_col].to_numpy(dtype=float)
                 y_for_autoscale.append(y_med)
-                median_line, = ax.plot(
+                median_line, = plot_ax.plot(
                     x,
                     y_med,
                     marker="o",
@@ -395,7 +403,7 @@ def plot_grouped_mean_median_quantile_summary(
             if show_mean and mean_col in summary_df.columns:
                 y_mean = summary_df[mean_col].to_numpy(dtype=float)
                 y_for_autoscale.append(y_mean)
-                mean_line, = ax.plot(
+                mean_line, = plot_ax.plot(
                     x,
                     y_mean,
                     marker="x",
@@ -412,38 +420,39 @@ def plot_grouped_mean_median_quantile_summary(
                 fill_kwargs = {"alpha": 0.15}
                 if color is not None:
                     fill_kwargs["color"] = color
-                ax.fill_between(x, y_lo, y_hi, **fill_kwargs)
+                plot_ax.fill_between(x, y_lo, y_hi, **fill_kwargs)
 
-        ax.set_title(title)
-        ax.set_xlabel(x_labels.get(x_col, x_col))
-        ax.set_ylabel(ylabel)
+        plot_ax.set_title(title)
+        plot_ax.set_xlabel(x_labels.get(x_col, x_col))
+        plot_ax.set_ylabel(ylabel)
 
         if logx:
-            ax.set_xscale("log")
+            plot_ax.set_xscale("log")
         if logy:
-            ax.set_yscale("log")
+            plot_ax.set_yscale("log")
         if xlim is not None:
-            ax.set_xlim(xlim)
+            plot_ax.set_xlim(xlim)
         if ylim is not None:
-            ax.set_ylim(ylim)
+            plot_ax.set_ylim(ylim)
         elif xlim is not None:
             visible_ylim = _visible_y_limits(x, y_for_autoscale, xlim, logy=logy)
             if visible_ylim is not None:
-                ax.set_ylim(visible_ylim)
+                plot_ax.set_ylim(visible_ylim)
 
-        ax.grid(True, which="both", alpha=0.3)
+        plot_ax.grid(True, which="both", alpha=0.3)
         if legend_outside:
-            ax.legend(
+            plot_ax.legend(
                 loc="center left",
                 bbox_to_anchor=(1.02, 0.5),
                 framealpha=0.4,
                 fontsize="small"
             )
         else:
-            ax.legend(framealpha=0.4, fontsize="small")
+            plot_ax.legend(framealpha=0.4, fontsize="small")
 
-        fig.tight_layout()
-        plt.show()
+        if ax is None:
+            fig.tight_layout()
+            plt.show()
         # ax.legend(framealpha=0.4)
         # fig.tight_layout()
         # plt.show()

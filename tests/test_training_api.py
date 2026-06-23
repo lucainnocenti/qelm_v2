@@ -838,6 +838,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         fake_plotter,
     )
 
+    ax_sentinel = object()
     plotted_raw, plotted_summary, plotted_slopes = plot_saved_traindata(
         output_file,
         plots="mse",
@@ -846,6 +847,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         show_median=False,
         xlim=(10, 20),
         ylim=(0.1, 2.0),
+        ax=ax_sentinel,
     )
 
     assert calls["x_col"] == "ntr"
@@ -872,6 +874,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     assert calls["show_median"] is False
     assert calls["xlim"] == (10, 20)
     assert calls["ylim"] == (0.1, 2.0)
+    assert calls["ax"] is ax_sentinel
     pd.testing.assert_frame_equal(plotted_raw, raw)
     pd.testing.assert_frame_equal(plotted_summary, summary)
     pd.testing.assert_frame_equal(plotted_slopes, slopes)
@@ -943,6 +946,40 @@ def test_grouped_tilde_u_plot_can_show_mean_without_median(monkeypatch):
     assert ax.get_xlim() == (10, 20)
     assert ax.get_ylim()[1] < 2.0
     plt.close("all")
+
+
+def test_grouped_tilde_u_plot_draws_into_supplied_axes_without_show(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    show_calls = []
+    monkeypatch.setattr(plt, "show", lambda: show_calls.append(True))
+    summary = pd.DataFrame(
+        {
+            "ntr": [12, 16],
+            "actual_mse_median": [1.0, 0.8],
+            "actual_mse_mean": [1.1, 0.9],
+            "actual_mse_q10": [0.9, 0.7],
+            "actual_mse_q90": [1.2, 1.0],
+        }
+    )
+    fig, axes = plt.subplots(1, 2)
+
+    for ax, title in zip(axes, ("left", "right")):
+        workflows.plot_grouped_mean_median_quantile_summary(
+            summary,
+            x_col="ntr",
+            plots=[([("actual_mse", "MSE")], title, "ylabel")],
+            quantile_band=(0.10, 0.90),
+            logx=False,
+            logy=False,
+            show_mean=False,
+            ax=ax,
+        )
+
+    assert show_calls == []
+    assert [len(ax.lines) for ax in axes] == [1, 1]
+    assert [ax.get_title() for ax in axes] == ["left", "right"]
+    plt.close(fig)
 
 
 def test_grouped_tilde_u_plot_explicit_ylim_overrides_visible_x_autoscale(monkeypatch):

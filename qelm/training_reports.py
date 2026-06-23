@@ -666,7 +666,8 @@ def render_training_results(
     show_band: bool = True,
     xlim: tuple[float | None, float | None] | None = None,
     ylim: tuple[float | None, float | None] | None = None,
-    legend_outside: bool = False
+    legend_outside: bool = False,
+    ax=None,
 ) -> None:
     """Display optional tables and render the configured training summary plots."""
     if show_summary:
@@ -696,7 +697,8 @@ def render_training_results(
         show_band=show_band,
         xlim=xlim,
         ylim=ylim,
-        legend_outside=legend_outside
+        legend_outside=legend_outside,
+        ax=ax,
     )
 
 
@@ -718,7 +720,8 @@ def plot_saved_traindata(
     show_band: bool = True,
     xlim: tuple[float | None, float | None] | None = None,
     ylim: tuple[float | None, float | None] | None = None,
-    legend_outside=False
+    legend_outside=False,
+    ax=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load or reuse saved training data and plot it like live results.
@@ -757,7 +760,8 @@ def plot_saved_traindata(
         show_band=show_band,
         xlim=xlim,
         ylim=ylim,
-        legend_outside=legend_outside
+        legend_outside=legend_outside,
+        ax=ax,
     )
 
     return raw_df, summary_df, slopes_df
