@@ -266,6 +266,54 @@ def plot_mean_median_quantile_summary(
         ax.legend()
         plt.show()
 
+
+def _visible_y_limits(x, y_arrays, xlim, *, logy):
+    x = np.asarray(x, dtype=float)
+    mask = np.isfinite(x)
+    if xlim is not None:
+        lo, hi = xlim
+        if lo is not None and hi is not None:
+            lo, hi = min(lo, hi), max(lo, hi)
+        if lo is not None:
+            mask &= x >= lo
+        if hi is not None:
+            mask &= x <= hi
+
+    values = []
+    for y in y_arrays:
+        y = np.asarray(y, dtype=float)
+        visible = y[mask & np.isfinite(y)]
+        if logy:
+            visible = visible[visible > 0]
+        if visible.size:
+            values.append(visible)
+    if not values:
+        return None
+
+    values = np.concatenate(values)
+    ymin = float(np.min(values))
+    ymax = float(np.max(values))
+    if not np.isfinite(ymin) or not np.isfinite(ymax):
+        return None
+
+    if logy:
+        if ymin <= 0:
+            return None
+        if ymin == ymax:
+            factor = 1.2
+            return ymin / factor, ymax * factor
+        log_min = np.log10(ymin)
+        log_max = np.log10(ymax)
+        pad = 0.05 * (log_max - log_min)
+        return 10 ** (log_min - pad), 10 ** (log_max + pad)
+
+    if ymin == ymax:
+        pad = 0.05 * abs(ymin) if ymin != 0 else 1.0
+    else:
+        pad = 0.05 * (ymax - ymin)
+    return ymin - pad, ymax + pad
+
+
 def plot_grouped_mean_median_quantile_summary(
     summary_df,
     *,
@@ -276,7 +324,11 @@ def plot_grouped_mean_median_quantile_summary(
     logy=True,
     figsize=(5.5, 4.0),
     show_mean=True,
+    show_median=True,
     show_band=True,
+    xlim=None,
+    ylim=None,
+    legend_outside=False
 ):
     """
     Plot several summarized quantities on the same axes.
@@ -310,7 +362,13 @@ def plot_grouped_mean_median_quantile_summary(
     }
 
     for series_specs, title, ylabel in plots:
-        fig, ax = plt.subplots(figsize=figsize)
+        # fig, ax = plt.subplots(figsize=figsize)
+        legend_width = 1.8 if legend_outside else 0.0
+
+        fig, ax = plt.subplots(
+            figsize=(figsize[0] + legend_width, figsize[1])
+        )
+        y_for_autoscale = []
 
         for base, label in series_specs:
             median_col = f"{base}_median"
@@ -318,41 +376,43 @@ def plot_grouped_mean_median_quantile_summary(
             qlo_col = f"{base}_{qlo_suffix}"
             qhi_col = f"{base}_{qhi_suffix}"
 
-            if median_col not in summary_df.columns:
+            if show_median and median_col not in summary_df.columns:
                 raise ValueError(f"Missing column {median_col}")
 
-            y_med = summary_df[median_col].to_numpy(dtype=float)
-
-            median_line, = ax.plot(
-                x,
-                y_med,
-                marker="o",
-                linestyle="-",
-                label=f"{label}, median",
-            )
-            color = median_line.get_color()
+            color = None
+            if show_median:
+                y_med = summary_df[median_col].to_numpy(dtype=float)
+                y_for_autoscale.append(y_med)
+                median_line, = ax.plot(
+                    x,
+                    y_med,
+                    marker="o",
+                    linestyle="-",
+                    label=f"{label}, median",
+                )
+                color = median_line.get_color()
 
             if show_mean and mean_col in summary_df.columns:
                 y_mean = summary_df[mean_col].to_numpy(dtype=float)
-                ax.plot(
+                y_for_autoscale.append(y_mean)
+                mean_line, = ax.plot(
                     x,
                     y_mean,
                     marker="x",
                     linestyle="--",
-                    color=color,
+                    **({} if color is None else {"color": color}),
                     label=f"{label}, mean",
                 )
+                color = mean_line.get_color()
 
             if show_band and qlo_col in summary_df.columns and qhi_col in summary_df.columns:
                 y_lo = summary_df[qlo_col].to_numpy(dtype=float)
                 y_hi = summary_df[qhi_col].to_numpy(dtype=float)
-                ax.fill_between(
-                    x,
-                    y_lo,
-                    y_hi,
-                    color=color,
-                    alpha=0.15,
-                )
+                y_for_autoscale.extend((y_lo, y_hi))
+                fill_kwargs = {"alpha": 0.15}
+                if color is not None:
+                    fill_kwargs["color"] = color
+                ax.fill_between(x, y_lo, y_hi, **fill_kwargs)
 
         ax.set_title(title)
         ax.set_xlabel(x_labels.get(x_col, x_col))
@@ -362,11 +422,31 @@ def plot_grouped_mean_median_quantile_summary(
             ax.set_xscale("log")
         if logy:
             ax.set_yscale("log")
+        if xlim is not None:
+            ax.set_xlim(xlim)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+        elif xlim is not None:
+            visible_ylim = _visible_y_limits(x, y_for_autoscale, xlim, logy=logy)
+            if visible_ylim is not None:
+                ax.set_ylim(visible_ylim)
 
         ax.grid(True, which="both", alpha=0.3)
-        ax.legend(framealpha=0.4)
+        if legend_outside:
+            ax.legend(
+                loc="center left",
+                bbox_to_anchor=(1.02, 0.5),
+                framealpha=0.4,
+                fontsize="small"
+            )
+        else:
+            ax.legend(framealpha=0.4, fontsize="small")
+
         fig.tight_layout()
         plt.show()
+        # ax.legend(framealpha=0.4)
+        # fig.tight_layout()
+        # plt.show()
 
 def plot_metric_vs_predictors(summary: pd.DataFrame, quantile: str = "p90") -> None:
     """

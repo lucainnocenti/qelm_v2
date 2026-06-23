@@ -38,30 +38,30 @@ OVERWRITE = False
 OUTPUT_DIR = PROJECT_ROOT / "data" / "rndpovm_haarstates_avgtesttarget_grid"
 OUTPUT_STEM = ""
 
-
-def _rank(d: int) -> int:
-    return int(d) * int(d)
-
-
 def _nout_values(d: int) -> tuple[int, ...]:
-    rank = _rank(d)
+    rank = int(d)**2
     return tuple(int(nout) for nout in GRID_VALUES if int(nout) > rank)
 
 
 def _ntr_values(nout: int) -> tuple[int, ...]:
+    # used by _work_items to generate the ntr values for a given nout value
     return tuple(int(ntr) for ntr in GRID_VALUES if int(ntr) >= int(nout))
 
 
 def _output_file(*, d: int, nout: int, N: int) -> Path:
+    # used by _work_items to generate the output file path for a given d, nout, and N value
     return OUTPUT_DIR / f"{OUTPUT_STEM}_d{int(d)}_nout{int(nout)}_N{int(N)}_vsntr.zip"
 
 
 def _work_items() -> list[dict]:
+    # returns a list of work items, where each item is a dict containing the parameters for a single run
     rng = np.random.default_rng(SEED)
     items = []
 
     for d in DIMS:
+        # _nout_values ensures nout > d^2
         for nout in _nout_values(d):
+            # _ntr_values ensures ntr >= nout
             sweep_values = _ntr_values(nout)
             if not sweep_values:
                 continue
@@ -86,6 +86,9 @@ def _item_cost(item: dict) -> int:
 
 
 def _split_work_items(items: list[dict], parts: int) -> list[list[dict]]:
+    # this attempts to balance the work across the workers by sorting the items
+    # by cost and assigning them to the worker with the least total cost so far
+    # The cost is defined as the product of nout and the sum of the sweep values
     chunks = [[] for _ in range(parts)]
     loads = [0 for _ in range(parts)]
 
@@ -100,6 +103,8 @@ def _split_work_items(items: list[dict], parts: int) -> list[list[dict]]:
 
 
 def _study_from_item(item: dict) -> TildeUTrainingApproxStudySpec:
+    # prepare the study spec for a given work item, ie takes as input parameters
+    # d, nout, N, and sweep_values, and returns a TildeUTrainingApproxStudySpec object
     base = QELMTrainingSpec(
         data=QELMDataSpec(
             d=int(item["d"]),
@@ -191,7 +196,9 @@ def _init_tqdm_lock(lock) -> None:
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # each item is a dict containing the parameters for a single run
     items = _work_items()
+    # ensure meaningful worker count
     worker_count = min(MAX_PROCESSES, os.cpu_count() or 1, len(items))
     worker_count = max(1, worker_count)
 
@@ -201,6 +208,7 @@ def main() -> None:
         flush=True,
     )
 
+    # partitions the work items into chunks, to be processed by each worker
     chunks = _split_work_items(items, worker_count)
     payloads = [
         {"worker_index": index + 1, "items": chunk}

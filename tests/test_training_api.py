@@ -840,6 +840,9 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         plots="mse",
         quantile_band=(0.10, 0.90),
         show_mean=False,
+        show_median=False,
+        xlim=(10, 20),
+        ylim=(0.1, 2.0),
     )
 
     assert calls["x_col"] == "ntr"
@@ -863,6 +866,9 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     assert "quantiles=" not in mse_title
     assert calls["quantile_band"] == (0.10, 0.90)
     assert calls["show_mean"] is False
+    assert calls["show_median"] is False
+    assert calls["xlim"] == (10, 20)
+    assert calls["ylim"] == (0.1, 2.0)
     pd.testing.assert_frame_equal(plotted_raw, raw)
     pd.testing.assert_frame_equal(plotted_summary, summary)
     pd.testing.assert_frame_equal(plotted_slopes, slopes)
@@ -900,6 +906,70 @@ def test_grouped_tilde_u_plot_uses_latex_axis_labels(monkeypatch, x_col, expecte
     )
 
     assert plt.gcf().axes[0].get_xlabel() == expected_label
+    plt.close("all")
+
+
+def test_grouped_tilde_u_plot_can_show_mean_without_median(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    summary = pd.DataFrame(
+        {
+            "ntr": [12, 16, 100],
+            "actual_mse_median": [1.0, 0.8, 50.0],
+            "actual_mse_mean": [1.1, 0.9, 60.0],
+            "actual_mse_q10": [0.9, 0.7, 40.0],
+            "actual_mse_q90": [1.2, 1.0, 70.0],
+        }
+    )
+
+    workflows.plot_grouped_mean_median_quantile_summary(
+        summary,
+        x_col="ntr",
+        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        quantile_band=(0.10, 0.90),
+        logx=False,
+        logy=False,
+        show_median=False,
+        xlim=(10, 20),
+    )
+
+    ax = plt.gcf().axes[0]
+    labels = [line.get_label() for line in ax.lines]
+    assert labels == ["MSE, mean"]
+    assert ax.get_xlim() == (10, 20)
+    assert ax.get_ylim()[1] < 2.0
+    plt.close("all")
+
+
+def test_grouped_tilde_u_plot_explicit_ylim_overrides_visible_x_autoscale(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    monkeypatch.setattr(plt, "show", lambda: None)
+    summary = pd.DataFrame(
+        {
+            "ntr": [12, 16, 100],
+            "actual_mse_median": [1.0, 0.8, 50.0],
+            "actual_mse_mean": [1.1, 0.9, 60.0],
+            "actual_mse_q10": [0.9, 0.7, 40.0],
+            "actual_mse_q90": [1.2, 1.0, 70.0],
+        }
+    )
+
+    workflows.plot_grouped_mean_median_quantile_summary(
+        summary,
+        x_col="ntr",
+        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        quantile_band=(0.10, 0.90),
+        logx=False,
+        logy=False,
+        xlim=(10, 20),
+        ylim=(0.25, 3.0),
+    )
+
+    ax = plt.gcf().axes[0]
+    assert ax.get_xlim() == (10, 20)
+    assert ax.get_ylim() == (0.25, 3.0)
     plt.close("all")
 
 

@@ -756,9 +756,9 @@ def _as_tilde_u_training_approx_report_data(report: str | Path | dict) -> dict:
             "report must be a .zip path or a dict returned by "
             "load_tilde_u_training_approx_report_data."
         )
-    normalized = dict(report)
-    normalized["metadata"] = _normalize_tilde_u_report_metadata(report["metadata"])
-    return normalized
+    report_as_dict = dict(report)
+    report_as_dict["metadata"] = _normalize_tilde_u_report_metadata(report["metadata"])
+    return report_as_dict
 
 
 def _tilde_u_report_rank_from_metadata(metadata: dict) -> int | None:
@@ -912,7 +912,11 @@ def render_tilde_u_training_approx_report(
     logy: bool = True,
     figsize: tuple[float, float] = (5.5, 4.0),
     show_mean: bool = True,
+    show_median: bool = True,
     show_band: bool = True,
+    xlim: tuple[float | None, float | None] | None = None,
+    ylim: tuple[float | None, float | None] | None = None,
+    legend_outside: bool = False
 ) -> None:
     """Display optional tables and render the configured tilde-U summary plots."""
     if show_summary:
@@ -938,7 +942,11 @@ def render_tilde_u_training_approx_report(
         logy=logy,
         figsize=figsize,
         show_mean=show_mean,
+        show_median=show_median,
         show_band=show_band,
+        xlim=xlim,
+        ylim=ylim,
+        legend_outside=legend_outside
     )
 
 
@@ -956,7 +964,11 @@ def plot_saved_training_data(
     logy: bool = True,
     figsize: tuple[float, float] = (5.5, 4.0),
     show_mean: bool = True,
+    show_median: bool = True,
     show_band: bool = True,
+    xlim: tuple[float | None, float | None] | None = None,
+    ylim: tuple[float | None, float | None] | None = None,
+    legend_outside=False
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Load or reuse a saved tilde-U report and plot it like the live report.
@@ -991,7 +1003,11 @@ def plot_saved_training_data(
         logy=logy,
         figsize=figsize,
         show_mean=show_mean,
+        show_median=show_median,
         show_band=show_band,
+        xlim=xlim,
+        ylim=ylim,
+        legend_outside=legend_outside
     )
 
     return raw_df, summary_df, slopes_df
