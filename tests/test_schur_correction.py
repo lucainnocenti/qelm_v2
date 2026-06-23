@@ -10,11 +10,11 @@ from qelm import (
     QELMTestRequest,
     QELMTrainingSpec,
     QuantumStateBatch,
-    TildeUTrainingApproxStudySpec,
+    TrainingStudySpec,
     generate_random_rank1_povm,
     leading_training_bias_variance_terms,
     leading_training_bias_variance_terms_target_average,
-    run_tilde_u_training_approx_experiment,
+    run_training_experiment,
     one_schur_correction_trial,
     run_schur_complement_approx_experiment,
     run_schur_correction_report,
@@ -27,7 +27,7 @@ from qelm import (
 EXPLICIT_TARGET = np.array([[1.0, 0.0], [0.0, 0.0]])
 
 
-def _tilde_u_study(
+def _training_study(
     *,
     d=2,
     nout=8,
@@ -44,7 +44,7 @@ def _tilde_u_study(
     seed=123,
     verbose=False,
     sweep_values=None,
-) -> TildeUTrainingApproxStudySpec:
+) -> TrainingStudySpec:
     if train_states is None:
         train_states = {"kind": "haar_pure", "num_states": ntr}
     if isinstance(povm, np.ndarray):
@@ -67,7 +67,7 @@ def _tilde_u_study(
             actual_noise_trials=actual_noise_trials,
         ),
     )
-    return TildeUTrainingApproxStudySpec(
+    return TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(ntr,) if sweep_values is None else sweep_values,
@@ -80,8 +80,8 @@ def _tilde_u_study(
     )
 
 
-def _run_tilde_u(**kwargs):
-    return run_tilde_u_training_approx_experiment(_tilde_u_study(**kwargs))
+def _run_training(**kwargs):
+    return run_training_experiment(_training_study(**kwargs))
 
 
 def test_random_isometry_povm_probability_matrix_is_column_stochastic():
@@ -110,8 +110,8 @@ def test_random_isometry_train_test_probability_matrices_share_outcomes():
     validate_probability_matrix(P_test, atol=1e-10)
 
 
-def test_run_tilde_u_training_approx_experiment_default_haar_test_state_shapes():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_default_haar_test_state_shapes():
+    raw, summary = _run_training(
         repetitions=2,
         actual_noise_trials=2,
     )
@@ -124,11 +124,11 @@ def test_run_tilde_u_training_approx_experiment_default_haar_test_state_shapes()
     assert "actual_mse_median" in summary.columns
 
 
-def test_run_tilde_u_training_approx_experiment_accepts_explicit_povm_effects():
+def test_run_training_experiment_accepts_explicit_povm_effects():
     rng = np.random.default_rng(456)
     effects = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         povm=effects,
         ntr=16,
         repetitions=1,
@@ -142,11 +142,11 @@ def test_run_tilde_u_training_approx_experiment_accepts_explicit_povm_effects():
     assert set(summary["nout"]) == {8}
 
 
-def test_run_tilde_u_training_approx_experiment_accepts_povm_dictionary_effects():
+def test_run_training_experiment_accepts_povm_dictionary_effects():
     rng = np.random.default_rng(456)
     effects = generate_random_rank1_povm(nout=8, dim=2, rng=rng)
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         povm={"effects": effects, "label": "test_povm"},
         repetitions=1,
         actual_noise_trials=1,
@@ -157,8 +157,8 @@ def test_run_tilde_u_training_approx_experiment_accepts_povm_dictionary_effects(
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_accepts_random_povm_spec():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_accepts_random_povm_spec():
+    raw, summary = _run_training(
         povm={"kind": "random_rank1", "nout": 8, "dim": 2},
         ntr=16,
         repetitions=1,
@@ -171,8 +171,8 @@ def test_run_tilde_u_training_approx_experiment_accepts_random_povm_spec():
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_haar_sample_test_state_shapes():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_haar_sample_test_state_shapes():
+    raw, summary = _run_training(
         repetitions=2,
         actual_noise_trials=2,
         test_state=("haar_sample", 3),
@@ -186,10 +186,10 @@ def test_run_tilde_u_training_approx_experiment_haar_sample_test_state_shapes():
     assert "actual_mse_median" in summary.columns
 
 
-def test_run_tilde_u_training_approx_experiment_fixed_test_state_vector_shapes():
+def test_run_training_experiment_fixed_test_state_vector_shapes():
     psi = np.array([1.0, 1.0j]) / np.sqrt(2.0)
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         repetitions=2,
         actual_noise_trials=2,
         test_state=psi,
@@ -203,10 +203,10 @@ def test_run_tilde_u_training_approx_experiment_fixed_test_state_vector_shapes()
     assert "actual_mse_median" in summary.columns
 
 
-def test_run_tilde_u_training_approx_experiment_test_state_vector_is_fixed_state():
+def test_run_training_experiment_test_state_vector_is_fixed_state():
     psi = np.array([1.0, 1.0j]) / np.sqrt(2.0)
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         test_state=psi,
@@ -218,8 +218,8 @@ def test_run_tilde_u_training_approx_experiment_test_state_vector_is_fixed_state
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_test_state_dictionary_selector():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_test_state_dictionary_selector():
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         test_state={"kind": "haar_sample", "num_points": 3},
@@ -231,10 +231,10 @@ def test_run_tilde_u_training_approx_experiment_test_state_dictionary_selector()
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_fixed_test_state_density_shapes():
+def test_run_training_experiment_fixed_test_state_density_shapes():
     rho = np.array([[1.0, 0.0], [0.0, 0.0]])
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         test_state=rho,
@@ -246,8 +246,8 @@ def test_run_tilde_u_training_approx_experiment_fixed_test_state_density_shapes(
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_verbose_progress_does_not_keyerror():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_verbose_progress_does_not_keyerror():
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         verbose=True,
@@ -257,9 +257,9 @@ def test_run_tilde_u_training_approx_experiment_verbose_progress_does_not_keyerr
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_requires_target_observable():
+def test_run_training_experiment_requires_target_observable():
     with pytest.raises(ValueError, match="Target observable is required"):
-        _run_tilde_u(
+        _run_training(
             repetitions=1,
             actual_noise_trials=1,
             target_observable=None,
@@ -434,8 +434,8 @@ def test_target_average_leading_terms_match_empirical_target_second_moment():
     )
 
 
-def test_run_tilde_u_training_approx_experiment_haar_target_average_shapes():
-    raw, summary = _run_tilde_u(
+def test_run_training_experiment_haar_target_average_shapes():
+    raw, summary = _run_training(
         repetitions=2,
         actual_noise_trials=2,
         target_observable="haar_pure_average",
@@ -449,10 +449,10 @@ def test_run_tilde_u_training_approx_experiment_haar_target_average_shapes():
     assert "actual_mse_median" in summary.columns
 
 
-def test_run_tilde_u_training_approx_experiment_operator_target_shapes():
+def test_run_training_experiment_operator_target_shapes():
     operator = np.array([[1.0, 0.0], [0.0, 0.0]])
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         target_observable=operator,
@@ -464,10 +464,10 @@ def test_run_tilde_u_training_approx_experiment_operator_target_shapes():
     assert len(summary) == 1
 
 
-def test_run_tilde_u_training_approx_experiment_pure_state_vector_target_shapes():
+def test_run_training_experiment_pure_state_vector_target_shapes():
     psi = np.array([1.0, 1.0j]) / np.sqrt(2.0)
 
-    raw, summary = _run_tilde_u(
+    raw, summary = _run_training(
         repetitions=1,
         actual_noise_trials=1,
         target_observable=psi,

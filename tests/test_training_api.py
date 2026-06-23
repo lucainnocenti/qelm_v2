@@ -14,7 +14,8 @@ from qelm import (
     QELMTrainingSpec,
     POVM,
     QuantumStateBatch,
-    TildeUTrainingApproxStudySpec,
+    TrainingReport,
+    TrainingStudySpec,
     analyze_qelm_training,
     clear_default_rng,
     compute_qelm_diagnostics,
@@ -22,16 +23,16 @@ from qelm import (
     generate_qubit_mub_povm,
     generate_random_rank1_povm,
     leading_training_bias_variance_terms,
-    load_tilde_u_training_approx_report_data,
+    load_traindata,
     make_qelm_training_context,
-    plot_saved_training_data,
+    plot_saved_traindata,
     resolve_qelm_target,
     resolve_qelm_test,
     run_qelm_actual_training,
-    run_tilde_u_training_approx_experiment,
-    run_tilde_u_training_approx_report,
+    run_training_experiment,
+    run_training_and_report_results,
     set_default_rng,
-    summarize_saved_training_data,
+    summarize_traindata,
     tilde_u_correction_operator_diagnostics,
 )
 
@@ -565,7 +566,7 @@ def test_leading_error_matches_existing_low_level_function():
 def test_spec_based_tilde_u_experiment_runs():
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12, 16),
@@ -574,7 +575,7 @@ def test_spec_based_tilde_u_experiment_runs():
         verbose=False,
     )
 
-    raw, summary = run_tilde_u_training_approx_experiment(study)
+    raw, summary = run_training_experiment(study)
 
     assert len(raw) == 2
     assert set(raw["ntr"]) == {12, 16}
@@ -584,7 +585,7 @@ def test_spec_based_tilde_u_experiment_runs():
 def test_spec_based_tilde_u_experiment_accepts_haar_pure_string_training_states():
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states="haar_pure")
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12, 16),
@@ -593,7 +594,7 @@ def test_spec_based_tilde_u_experiment_accepts_haar_pure_string_training_states(
         verbose=False,
     )
 
-    raw, summary = run_tilde_u_training_approx_experiment(study)
+    raw, summary = run_training_experiment(study)
 
     assert len(raw) == 2
     assert set(raw["ntr"]) == {12, 16}
@@ -610,7 +611,7 @@ def test_spec_based_tilde_u_N_sweep_can_supply_missing_base_noise_N():
         test=base.test,
         numerics=base.numerics,
     )
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="N",
         sweep_values=(10, 20),
@@ -619,7 +620,7 @@ def test_spec_based_tilde_u_N_sweep_can_supply_missing_base_noise_N():
         verbose=False,
     )
 
-    raw, summary = run_tilde_u_training_approx_experiment(study)
+    raw, summary = run_training_experiment(study)
 
     assert len(raw) == 2
     assert set(raw["N"]) == {10, 20}
@@ -630,7 +631,7 @@ def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
     output_file = tmp_path / "tilde_u_sweep"
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12, 16),
@@ -643,13 +644,14 @@ def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
         output_file=output_file,
     )
 
-    raw, summary, slopes = run_tilde_u_training_approx_report(study)
+    raw, summary, slopes = run_training_and_report_results(study)
 
     saved_path = output_file.with_suffix(".zip")
     assert saved_path.exists()
-    loaded = load_tilde_u_training_approx_report_data(saved_path)
-    assert set(loaded) == {"raw", "metadata"}
-    assert list(loaded["raw"].columns) == [
+    loaded = load_traindata(saved_path)
+    assert isinstance(loaded, TrainingReport)
+    assert set(loaded.datadict) == {"data", "metadata"}
+    assert list(loaded.data.columns) == [
         "trial",
         "ntr",
         "leading_bias_sq",
@@ -661,38 +663,38 @@ def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
         "variance",
     ]
     pd.testing.assert_series_equal(
-        loaded["raw"]["mse"],
+        loaded.data["mse"],
         raw["actual_mse"],
         check_names=False,
     )
-    assert "trial_seed" not in loaded["raw"].columns
-    assert "error" not in loaded["raw"].columns
-    assert "r" not in loaded["raw"].columns
-    assert "p_kernel" not in loaded["raw"].columns
-    assert loaded["metadata"]["created_at"]
-    assert loaded["metadata"]["completed_at"]
-    assert loaded["metadata"]["elapsed_seconds"] >= 0.0
-    assert "format" not in loaded["metadata"]
-    assert "x_col" not in loaded["metadata"]
-    assert "study" not in loaded["metadata"]
-    assert "base_spec" not in loaded["metadata"]
-    assert "concrete_specs" not in loaded["metadata"]
-    assert loaded["metadata"]["repetitions"] == study.repetitions
-    assert loaded["metadata"]["data"]["d"] == base.data.d
-    assert loaded["metadata"]["data"]["povm"]["kind"] == "random_rank1"
-    assert loaded["metadata"]["data"]["train_states"]["kind"] == "haar_pure"
-    assert loaded["metadata"]["target"]["observable"]["kind"] == "operator"
-    assert loaded["metadata"]["target"]["observable"]["operator"]["shape"] == [2, 2]
-    assert loaded["metadata"]["test"]["state"]["kind"] == "fixed_state"
-    assert loaded["metadata"]["test"]["state"]["state"]["shape"] == [2, 2]
-    assert loaded["metadata"]["sweep_col"] == "ntr"
-    assert loaded["metadata"]["sweep_values"] == [12, 16]
+    assert "trial_seed" not in loaded.data.columns
+    assert "error" not in loaded.data.columns
+    assert "r" not in loaded.data.columns
+    assert "p_kernel" not in loaded.data.columns
+    assert loaded.metadata["created_at"]
+    assert loaded.metadata["completed_at"]
+    assert loaded.metadata["elapsed_seconds"] >= 0.0
+    assert "format" not in loaded.metadata
+    assert "x_col" not in loaded.metadata
+    assert "study" not in loaded.metadata
+    assert "base_spec" not in loaded.metadata
+    assert "concrete_specs" not in loaded.metadata
+    assert loaded.metadata["repetitions"] == study.repetitions
+    assert loaded.metadata["data"]["d"] == base.data.d
+    assert loaded.metadata["data"]["povm"]["kind"] == "random_rank1"
+    assert loaded.metadata["data"]["train_states"]["kind"] == "haar_pure"
+    assert loaded.metadata["target"]["observable"]["kind"] == "operator"
+    assert loaded.metadata["target"]["observable"]["operator"]["shape"] == [2, 2]
+    assert loaded.metadata["test"]["state"]["kind"] == "fixed_state"
+    assert loaded.metadata["test"]["state"]["state"]["shape"] == [2, 2]
+    assert loaded.metadata["sweep_col"] == "ntr"
+    assert loaded.metadata["sweep_values"] == [12, 16]
 
 
 def test_tilde_u_report_rejects_pickle_output(tmp_path):
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12,),
@@ -706,7 +708,7 @@ def test_tilde_u_report_rejects_pickle_output(tmp_path):
     )
 
     with pytest.raises(ValueError, match=r"must end in \.zip"):
-        run_tilde_u_training_approx_report(study)
+        run_training_and_report_results(study)
 
 
 def test_tilde_u_report_avoids_overwriting_existing_output(tmp_path):
@@ -715,7 +717,7 @@ def test_tilde_u_report_avoids_overwriting_existing_output(tmp_path):
     output_file = tmp_path / "tilde_u_sweep.zip"
     output_file.write_bytes(b"existing report")
     (tmp_path / "tilde_u_sweep_1.zip").write_bytes(b"existing numbered report")
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12,),
@@ -728,12 +730,12 @@ def test_tilde_u_report_avoids_overwriting_existing_output(tmp_path):
         output_file=output_file,
     )
 
-    run_tilde_u_training_approx_report(study)
+    run_training_and_report_results(study)
 
     assert output_file.read_bytes() == b"existing report"
     assert (tmp_path / "tilde_u_sweep_1.zip").read_bytes() == b"existing numbered report"
-    loaded = load_tilde_u_training_approx_report_data(tmp_path / "tilde_u_sweep_2.zip")
-    assert loaded["metadata"]["sweep_values"] == [12]
+    loaded = load_traindata(tmp_path / "tilde_u_sweep_2.zip")
+    assert loaded.metadata["sweep_values"] == [12]
 
 
 def test_tilde_u_report_overwrite_reuses_requested_output(tmp_path):
@@ -741,7 +743,7 @@ def test_tilde_u_report_overwrite_reuses_requested_output(tmp_path):
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
     output_file = tmp_path / "tilde_u_sweep.zip"
     output_file.write_bytes(b"existing report")
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12,),
@@ -755,10 +757,10 @@ def test_tilde_u_report_overwrite_reuses_requested_output(tmp_path):
         overwrite=True,
     )
 
-    run_tilde_u_training_approx_report(study)
+    run_training_and_report_results(study)
 
-    loaded = load_tilde_u_training_approx_report_data(output_file)
-    assert loaded["metadata"]["sweep_values"] == [12]
+    loaded = load_traindata(output_file)
+    assert loaded.metadata["sweep_values"] == [12]
     assert not (tmp_path / "tilde_u_sweep_1.zip").exists()
 
 
@@ -766,7 +768,7 @@ def test_tilde_u_report_saves_portable_parquet_zip(tmp_path):
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
     output_file = tmp_path / "tilde_u_sweep.zip"
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12, 16),
@@ -779,22 +781,23 @@ def test_tilde_u_report_saves_portable_parquet_zip(tmp_path):
         output_file=output_file,
     )
 
-    raw, summary, slopes = run_tilde_u_training_approx_report(study)
+    raw, summary, slopes = run_training_and_report_results(study)
 
-    loaded = load_tilde_u_training_approx_report_data(output_file)
-    assert set(loaded) == {"raw", "metadata"}
+    loaded = load_traindata(output_file)
+    assert isinstance(loaded, TrainingReport)
+    assert set(loaded.datadict) == {"data", "metadata"}
     np.testing.assert_allclose(
-        loaded["raw"]["leading_bias_sq"] + loaded["raw"]["leading_variance"],
+        loaded.data["leading_bias_sq"] + loaded.data["leading_variance"],
         raw["leading_mse_exact"],
     )
-    assert loaded["metadata"]["sweep_values"] == [12, 16]
+    assert loaded.metadata["sweep_values"] == [12, 16]
 
 
 def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monkeypatch):
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(target=target, train_states={"kind": "haar_pure"})
     output_file = tmp_path / "tilde_u_sweep.zip"
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=(12, 16),
@@ -806,17 +809,17 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         make_plots=False,
         output_file=output_file,
     )
-    run_tilde_u_training_approx_report(study)
+    run_training_and_report_results(study)
 
-    loaded = load_tilde_u_training_approx_report_data(output_file)
-    raw, summary, slopes = summarize_saved_training_data(
+    loaded = load_traindata(output_file)
+    raw, summary, slopes = summarize_traindata(
         loaded,
         quantile_band=(0.10, 0.90),
     )
 
     np.testing.assert_allclose(
         raw["leading_mse_exact"],
-        loaded["raw"]["leading_bias_sq"] + loaded["raw"]["leading_variance"],
+        loaded.data["leading_bias_sq"] + loaded.data["leading_variance"],
     )
     assert set(summary["ntr"]) == {12, 16}
     assert "leading_mse_exact_q10" in summary.columns
@@ -835,7 +838,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         fake_plotter,
     )
 
-    plotted_raw, plotted_summary, plotted_slopes = plot_saved_training_data(
+    plotted_raw, plotted_summary, plotted_slopes = plot_saved_traindata(
         output_file,
         plots="mse",
         quantile_band=(0.10, 0.90),
@@ -846,7 +849,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     )
 
     assert calls["x_col"] == "ntr"
-    expected_mse_plot = workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"]
+    expected_mse_plot = workflows.TRAINING_PLOT_SPECS["mse"]
     mse_series, mse_title, mse_ylabel = calls["plots"][0]
     assert mse_series == expected_mse_plot[0]
     assert expected_mse_plot[1] in mse_title
@@ -985,7 +988,7 @@ def test_live_tilde_u_mse_plot_title_contains_context(monkeypatch):
         test=QELMTestRequest(state="haar_pure_average"),
         noise=QELMNoiseSpec(noise="multinomial", actual_noise_trials=1),
     )
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="N",
         sweep_values=(20,),
@@ -1009,7 +1012,7 @@ def test_live_tilde_u_mse_plot_title_contains_context(monkeypatch):
         fake_plotter,
     )
 
-    run_tilde_u_training_approx_report(study)
+    run_training_and_report_results(study)
 
     mse_title = calls["plots"][0][1]
     title_lines = mse_title.splitlines()
@@ -1043,11 +1046,11 @@ def test_tilde_u_mse_plot_title_recovers_old_unlabeled_mub_metadata():
         "noise": {"N": 100, "noise": "multinomial"},
     }
 
-    title = workflows._tilde_u_training_context_title_suffix(
+    title = workflows._training_context_title_suffix(
         metadata,
         quantile_band=(0.05, 0.95),
     )
-    normalized = workflows._normalize_tilde_u_report_metadata(metadata)
+    normalized = workflows._normalize_metadata(metadata)
 
     lines = title.splitlines()
     assert lines[0] == "POVM=qubit_mub; N=100"
@@ -1064,7 +1067,7 @@ def test_tilde_u_report_metadata_stores_explicit_povm_and_training_states(tmp_pa
     )
     target = np.array([[1.0, 0.0], [0.0, 0.0]])
     base = _small_spec(povm=povm, target=target, train_states=train_states)
-    study = TildeUTrainingApproxStudySpec(
+    study = TrainingStudySpec(
         base=base,
         sweep_col="N",
         sweep_values=(20,),
@@ -1077,48 +1080,52 @@ def test_tilde_u_report_metadata_stores_explicit_povm_and_training_states(tmp_pa
         output_file=tmp_path / "explicit.zip",
     )
 
-    run_tilde_u_training_approx_report(study)
+    run_training_and_report_results(study)
 
-    loaded = load_tilde_u_training_approx_report_data(tmp_path / "explicit.zip")
-    assert loaded["metadata"]["data"]["povm"]["kind"] == "explicit"
-    assert loaded["metadata"]["data"]["povm"]["label"] == "test_povm"
-    assert loaded["metadata"]["data"]["povm"]["effects"]["shape"] == [8, 2, 2]
-    assert loaded["metadata"]["data"]["train_states"]["kind"] == "explicit"
-    assert loaded["metadata"]["data"]["train_states"]["states"]["shape"] == [12, 2, 2]
-    assert loaded["metadata"]["target"]["observable"]["operator"]["shape"] == [2, 2]
+    loaded = load_traindata(tmp_path / "explicit.zip")
+    assert loaded.metadata["data"]["povm"]["kind"] == "explicit"
+    assert loaded.metadata["data"]["povm"]["label"] == "test_povm"
+    assert loaded.metadata["data"]["povm"]["effects"]["shape"] == [8, 2, 2]
+    assert loaded.metadata["data"]["train_states"]["kind"] == "explicit"
+    assert loaded.metadata["data"]["train_states"]["states"]["shape"] == [12, 2, 2]
+    assert loaded.metadata["target"]["observable"]["operator"]["shape"] == [2, 2]
 
 
 def test_tilde_u_plot_selector_uses_short_keys():
-    assert workflows._tilde_u_training_approx_plots_from_keys("mse") == [
-        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"]
+    assert workflows._training_plots_from_keys("mse") == [
+        workflows.TRAINING_PLOT_SPECS["mse"]
     ]
-    assert workflows._tilde_u_training_approx_plots_from_keys(("mse", "correction")) == [
-        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"],
-        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS["correction"],
+    assert workflows._training_plots_from_keys(("mse", "correction")) == [
+        workflows.TRAINING_PLOT_SPECS["mse"],
+        workflows.TRAINING_PLOT_SPECS["correction"],
     ]
-    assert workflows._tilde_u_training_approx_plots_from_keys("all") == (
-        workflows.TILDE_U_TRAINING_APPROX_PLOTS
+    assert workflows._training_plots_from_keys("all") == (
+        workflows.TRAINING_PLOTS
     )
 
-    with pytest.raises(ValueError, match="Unknown tilde-U plot key"):
-        workflows._tilde_u_training_approx_plots_from_keys("not_a_plot")
+    with pytest.raises(ValueError, match="Unknown training plot key"):
+        workflows._training_plots_from_keys("not_a_plot")
 
 
 def test_training_report_helpers_are_reexported_for_compatibility():
-    assert workflows.plot_saved_training_data is training_reports.plot_saved_training_data
-    assert workflows.summarize_saved_training_data is training_reports.summarize_saved_training_data
+    assert workflows.plot_saved_traindata is training_reports.plot_saved_traindata
+    assert workflows.summarize_traindata is training_reports.summarize_traindata
     assert (
-        workflows.load_tilde_u_training_approx_report_data
-        is training_reports.load_tilde_u_training_approx_report_data
+        workflows.load_traindata
+        is training_reports.load_traindata
     )
     assert (
-        workflows.summarize_tilde_u_training_approx
-        is training_reports.summarize_tilde_u_training_approx
+        workflows.summarize_dataraw
+        is training_reports.summarize_dataraw
     )
     assert (
-        workflows.TILDE_U_TRAINING_APPROX_PLOT_SPECS
-        is training_reports.TILDE_U_TRAINING_APPROX_PLOT_SPECS
+        workflows.TRAINING_PLOT_SPECS
+        is training_reports.TRAINING_PLOT_SPECS
     )
+    assert workflows.run_tilde_u_training_approx_experiment is workflows.run_training_experiment
+    assert workflows.run_tilde_u_training_approx_report is workflows.run_training_and_report_results
+    assert training_reports.load_tilde_u_training_approx_report_data is training_reports.load_traindata
+    assert training_reports.plot_saved_training_data is training_reports.plot_saved_traindata
 
 
 def test_actual_training_requires_noise_N_when_not_swept():

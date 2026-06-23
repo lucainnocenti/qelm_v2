@@ -14,8 +14,8 @@ from qelm import (
     QELMTargetRequest,
     QELMTestRequest,
     QELMTrainingSpec,
-    TildeUTrainingApproxStudySpec,
-    run_tilde_u_training_approx_report,
+    TrainingStudySpec,
+    run_training_and_report_results,
 )
 
 
@@ -23,15 +23,15 @@ def main():
     output_file = PROJECT_ROOT / "data" / "rndnout8_haarstates_N100_vsntr.zip"
     output_file.parent.mkdir(exist_ok=True)
 
-    tilde_u_training_spec = QELMTrainingSpec(
+    training_spec = QELMTrainingSpec(
         data=QELMDataSpec(d=2, nout=8, povm='random_rank1', train_states='haar_pure'),
         target=QELMTargetRequest(observable="haar_pure_average"),
         test=QELMTestRequest(state="haar_pure_average"),
         noise=QELMNoiseSpec(noise="multinomial", N=100, actual_noise_trials=1),
     )
 
-    tilde_u_study = TildeUTrainingApproxStudySpec(
-        base=tilde_u_training_spec,
+    training_study = TrainingStudySpec(
+        base=training_spec,
         sweep_col="ntr",
         sweep_values=(8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 10**4),
         repetitions=1000,
@@ -40,7 +40,7 @@ def main():
         output_file=output_file,
     )
 
-    run_tilde_u_training_approx_report(tilde_u_study)
+    run_training_and_report_results(training_study)
 
 
 if __name__ == "__main__":

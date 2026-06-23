@@ -1,7 +1,8 @@
-"""Tilde-U saved-report loading, summaries, and plotting."""
+"""Training-result loading, summaries, and plotting."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from io import BytesIO
 import json
 from pathlib import Path
@@ -23,7 +24,7 @@ except ImportError:  # pragma: no cover - plain Python fallback
         print(obj)
 
 
-TILDE_U_TRAINING_APPROX_METRIC_COLS = [
+TRAINING_METRIC_COLS = [
     "C22_inv_C21_op",
     "correction_op",
     "C22_lambda_min",
@@ -46,7 +47,7 @@ TILDE_U_TRAINING_APPROX_METRIC_COLS = [
     "leading_identity_relative_error",
 ]
 
-TILDE_U_TRAINING_APPROX_PLOT_SPECS = {
+TRAINING_PLOT_SPECS = {
     "correction": (
         [
             ("C22_inv_C21_op", r"$C_{22}^{-1}C_{21}$"),
@@ -110,9 +111,9 @@ TILDE_U_TRAINING_APPROX_PLOT_SPECS = {
         "|leading MSE - numerical MSE| / numerical MSE",
     ),
 }
-TILDE_U_TRAINING_APPROX_PLOTS = list(TILDE_U_TRAINING_APPROX_PLOT_SPECS.values())
+TRAINING_PLOTS = list(TRAINING_PLOT_SPECS.values())
 
-TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = {
+TRAINING_SAVED_METRIC_COLS = {
     "leading_bias_sq_exact": "leading_bias_sq",
     "leading_var_exact": "leading_variance",
     "leading_bias_sq_identity": "identity_leading_bias_sq",
@@ -121,7 +122,13 @@ TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = {
     "actual_bias_sq": "bias_sq",
     "actual_variance": "variance",
 }
-_SAVED_METRIC_COLS = TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS
+
+TILDE_U_TRAINING_APPROX_METRIC_COLS = TRAINING_METRIC_COLS
+TILDE_U_TRAINING_APPROX_PLOT_SPECS = TRAINING_PLOT_SPECS
+TILDE_U_TRAINING_APPROX_PLOTS = TRAINING_PLOTS
+TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
+
+_SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
 _COMPACT_TO_INTERNAL_METRIC_COLS = {
     compact: internal for internal, compact in _SAVED_METRIC_COLS.items()
 }
@@ -147,12 +154,77 @@ _EPS = 1e-15
 _LEGACY_REPORT_DIMENSION_COLS = ("r", "q", "p_kernel")
 
 
+@dataclass(frozen=True)
+class TrainingReport:
+    """Raw training result data plus metadata loaded from or saved to a report."""
+
+    data: pd.DataFrame
+    metadata: dict
+
+    @property
+    def datadict(self) -> dict:
+        """Return a plain dict representation with data and metadata."""
+        return {"data": self.data, "metadata": self.metadata}
+
+    def expanded_df(self) -> pd.DataFrame:
+        """Return raw data expanded with metadata constants and derived metrics."""
+        raw_df = _drop_legacy_report_dimension_cols(self.data).copy()
+
+        for compact_col, internal_col in _COMPACT_TO_INTERNAL_METRIC_COLS.items():
+            if compact_col in raw_df.columns and internal_col not in raw_df.columns:
+                raw_df[internal_col] = raw_df[compact_col]
+
+        data = self.metadata.get("data", {})
+        noise = self.metadata.get("noise", {})
+        target = self.metadata.get("target", {})
+        test = self.metadata.get("test", {})
+        constant_cols = {
+            "d": data.get("d"),
+            "nout": data.get("nout"),
+            "ntr": data.get("train_state_count"),
+            "N": noise.get("N"),
+            "noise": noise.get("noise"),
+            "test_state": test.get("state", {}).get("kind"),
+            "target_kind": target.get("observable", {}).get("kind"),
+            "target_normalization": target.get("normalization", "none"),
+        }
+
+        for col, value in constant_cols.items():
+            if col not in raw_df.columns and value is not None:
+                raw_df[col] = value
+        _add_derived_saved_report_metrics(raw_df)
+
+        return raw_df
+
+    def summarize(
+        self,
+        *,
+        quantiles: Sequence[float] | None = None,
+        quantile_band: tuple[float, float] | None = (0.25, 0.75),
+        x_col: str | None = None,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Build plotting-ready raw, summary, and slope tables."""
+        return summarize_traindata(
+            self,
+            quantiles=quantiles,
+            quantile_band=quantile_band,
+            x_col=x_col,
+        )
+
+    def plot(
+        self,
+        **kwargs,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Render plots from this report and return raw, summary, and slopes."""
+        return plot_saved_traindata(self, **kwargs)
+
+
 def _drop_legacy_report_dimension_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove obsolete saved-report dimension columns before summarizing data."""
+    """Remove obsolete saved traindata dimension columns before summarizing data."""
     return df.drop(columns=list(_LEGACY_REPORT_DIMENSION_COLS), errors="ignore")
 
 
-def _tilde_u_training_approx_plots_from_keys(
+def _training_plots_from_keys(
     plots: Sequence[str] | str | None,
 ) -> list[tuple]:
     """Resolve short plot keys from report options into concrete plot specs."""
@@ -164,21 +236,21 @@ def _tilde_u_training_approx_plots_from_keys(
         keys = tuple(plots)
 
     if not keys or "all" in keys:
-        return TILDE_U_TRAINING_APPROX_PLOTS
+        return TRAINING_PLOTS
 
-    unknown = tuple(key for key in keys if key not in TILDE_U_TRAINING_APPROX_PLOT_SPECS)
+    unknown = tuple(key for key in keys if key not in TRAINING_PLOT_SPECS)
     if unknown:
-        available = ", ".join(("all", *TILDE_U_TRAINING_APPROX_PLOT_SPECS))
-        raise ValueError(f"Unknown tilde-U plot key(s): {unknown}. Available keys: {available}.")
+        available = ", ".join(("all", *TRAINING_PLOT_SPECS))
+        raise ValueError(f"Unknown training plot key(s): {unknown}. Available keys: {available}.")
 
-    return [TILDE_U_TRAINING_APPROX_PLOT_SPECS[key] for key in keys]
+    return [TRAINING_PLOT_SPECS[key] for key in keys]
 
 
-def _tilde_u_context_povm_label(data: dict, sweep_col: str | None) -> str:
-    """Build the POVM label shown in contextualized tilde-U plot titles."""
+def _context_povm_label(data: dict, sweep_col: str | None) -> str:
+    """Build the POVM label shown in contextualized training plot titles."""
     povm = data.get("povm", {})
     kind = str(povm.get("kind", "unknown"))
-    label = _tilde_u_povm_label_from_descriptor(povm)
+    label = _povm_label_from_descriptor(povm)
     parts = [f"POVM={label}"]
 
     if kind == "random_rank1":
@@ -200,7 +272,7 @@ def _array_from_payload(payload: dict) -> np.ndarray:
     return array.astype(payload.get("dtype", array.dtype), copy=False)
 
 
-def _tilde_u_povm_label_from_descriptor(povm: dict) -> str:
+def _povm_label_from_descriptor(povm: dict) -> str:
     """Infer a human-readable POVM label from saved report metadata."""
     label = povm.get("label")
     if isinstance(label, str) and label.strip():
@@ -221,7 +293,7 @@ def _tilde_u_povm_label_from_descriptor(povm: dict) -> str:
     return kind
 
 
-def _tilde_u_context_average_label(kind: object) -> str:
+def _context_average_label(kind: object) -> str:
     """Convert metadata selector kinds into compact plot-title labels."""
     kind = "unknown" if kind is None else str(kind)
     if kind in {"fixed_state", "operator", "pure_state", "outcome_weights", "explicit"}:
@@ -235,17 +307,17 @@ def _tilde_u_context_average_label(kind: object) -> str:
     return kind
 
 
-def _tilde_u_context_quantile_label(
+def _context_quantile_label(
     quantile_band: tuple[float, float] | None,
 ) -> str | None:
-    """Format a quantile band for use in a tilde-U plot title."""
+    """Format a quantile band for use in a training plot title."""
     if quantile_band is None:
         return None
     qlo, qhi = quantile_band
     return f"{quantile_suffix(qlo)}-{quantile_suffix(qhi)}"
 
 
-def _tilde_u_training_context_title_suffix(
+def _training_context_title_suffix(
     metadata: dict,
     *,
     quantile_band: tuple[float, float] | None,
@@ -257,7 +329,7 @@ def _tilde_u_training_context_title_suffix(
     test = metadata.get("test", {}).get("state", {})
     target = metadata.get("target", {}).get("observable", {})
 
-    first_line = [_tilde_u_context_povm_label(data, sweep_col)]
+    first_line = [_context_povm_label(data, sweep_col)]
 
     ntr = data.get("train_state_count")
     if sweep_col != "ntr" and ntr is not None:
@@ -268,11 +340,11 @@ def _tilde_u_training_context_title_suffix(
         first_line.append(f"N={N}")
 
     second_line = [
-        f"test={_tilde_u_context_average_label(test.get('kind'))}",
-        f"target={_tilde_u_context_average_label(target.get('kind'))}",
+        f"test={_context_average_label(test.get('kind'))}",
+        f"target={_context_average_label(target.get('kind'))}",
     ]
 
-    quantiles = _tilde_u_context_quantile_label(quantile_band)
+    quantiles = _context_quantile_label(quantile_band)
     if quantiles is not None:
         second_line.append(quantiles)
 
@@ -287,7 +359,7 @@ def _tilde_u_training_context_title_suffix(
     )
 
 
-def _tilde_u_training_contextualized_plots(
+def _contextualized_training_plots(
     plots: Sequence[tuple],
     *,
     title_suffix: str | None,
@@ -296,7 +368,7 @@ def _tilde_u_training_contextualized_plots(
     if not title_suffix:
         return list(plots)
 
-    mse_title = TILDE_U_TRAINING_APPROX_PLOT_SPECS["mse"][1]
+    mse_title = TRAINING_PLOT_SPECS["mse"][1]
     contextualized = []
     for series_specs, title, ylabel in plots:
         if title == mse_title:
@@ -305,7 +377,7 @@ def _tilde_u_training_contextualized_plots(
     return contextualized
 
 
-def summarize_tilde_u_training_approx(
+def summarize_dataraw(
     raw_df: pd.DataFrame,
     *,
     quantiles: Sequence[float] = (0.25, 0.75),
@@ -322,7 +394,7 @@ def summarize_tilde_u_training_approx(
     ),
 ) -> pd.DataFrame:
     """
-    Summarize tilde-U approximation trials with configurable quantiles.
+    Summarize training-result trials with configurable quantiles.
     """
     rows = []
     ok = raw_df[~raw_df.get("failed", False).astype(bool)].copy() if "failed" in raw_df else raw_df
@@ -342,7 +414,7 @@ def summarize_tilde_u_training_approx(
         if "C22_kept_rank" in group.columns:
             row["C22_kept_rank_min"] = int(group["C22_kept_rank"].min())
 
-        for col in TILDE_U_TRAINING_APPROX_METRIC_COLS:
+        for col in TRAINING_METRIC_COLS:
             if col not in group.columns:
                 continue
             stats = distribution_summary(group[col].to_numpy(dtype=float), quantiles=quantiles)
@@ -354,7 +426,7 @@ def summarize_tilde_u_training_approx(
     return pd.DataFrame(rows).sort_values(list(active_group_cols)).reset_index(drop=True)
 
 
-def fit_tilde_u_training_approx_slopes(
+def fit_summary_slopes(
     summary_df: pd.DataFrame,
     *,
     x_col: str = "ntr",
@@ -368,7 +440,7 @@ def fit_tilde_u_training_approx_slopes(
     group_cols: Sequence[str] = ("d", "nout", "N", "noise"),
 ) -> pd.DataFrame:
     """
-    Fit log-log slopes for selected summarized tilde-U approximation quantities.
+    Fit log-log slopes for selected summarized training quantities.
     """
     rows = []
     grouped = summary_df.groupby(list(group_cols), dropna=False) if group_cols else [((), summary_df)]
@@ -396,8 +468,8 @@ def fit_tilde_u_training_approx_slopes(
     return pd.DataFrame(rows)
 
 
-def _tilde_u_slope_group_cols(summary_df: pd.DataFrame, x_col: str) -> tuple[str, ...]:
-    """Choose grouping columns for fitting tilde-U log-log slopes."""
+def _slope_group_cols(summary_df: pd.DataFrame, x_col: str) -> tuple[str, ...]:
+    """Choose grouping columns for fitting training-result log-log slopes."""
     excluded = {x_col}
 
     candidates = (
@@ -421,22 +493,22 @@ def _read_portable_dataframe_bytes(data: bytes) -> pd.DataFrame:
     return _drop_legacy_report_dimension_cols(pd.read_parquet(BytesIO(data)))
 
 
-def _normalize_tilde_u_report_metadata(metadata: dict) -> dict:
+def _normalize_metadata(metadata: dict) -> dict:
     """Normalize saved metadata and repair labels missing from older reports."""
     normalized = json.loads(json.dumps(metadata))
     povm = normalized.get("data", {}).get("povm")
     if isinstance(povm, dict):
         label = povm.get("label")
         if not isinstance(label, str) or not label.strip():
-            inferred = _tilde_u_povm_label_from_descriptor(povm)
+            inferred = _povm_label_from_descriptor(povm)
             if inferred not in {"unknown", "explicit"}:
                 povm["label"] = inferred
     return normalized
 
 
-def load_tilde_u_training_approx_report_data(path: str | Path) -> dict:
+def load_traindata(path: str | Path) -> TrainingReport:
     """
-    Load data saved by run_tilde_u_training_approx_report.
+    Load a portable training report as a TrainingReport.
 
     Portable .zip reports store tables as Parquet and metadata as plain JSON,
     so they are intended for moving between machines and pandas versions.
@@ -446,30 +518,40 @@ def load_tilde_u_training_approx_report_data(path: str | Path) -> dict:
         with ZipFile(report_path, "r") as archive:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             tables = manifest["tables"]
-            return {
-                "raw": _read_portable_dataframe_bytes(archive.read(tables["raw"])),
-                "metadata": _normalize_tilde_u_report_metadata(
+            return TrainingReport(
+                data=_read_portable_dataframe_bytes(archive.read(tables["raw"])),
+                metadata=_normalize_metadata(
                     json.loads(archive.read(manifest["metadata"]).decode("utf-8"))
                 ),
-            }
-    raise ValueError("tilde-U report path must end in .zip.")
+            )
+    raise ValueError("training report path must end in .zip.")
 
 
-def _as_tilde_u_training_approx_report_data(report: str | Path | dict) -> dict:
-    """Normalize a report path or loaded report dict to raw data plus metadata."""
+def _as_traindata(report: str | Path | dict | TrainingReport) -> TrainingReport:
+    """Normalize a report path, dict, or TrainingReport into TrainingReport."""
     if isinstance(report, (str, Path)):
-        return load_tilde_u_training_approx_report_data(report)
-    if not isinstance(report, dict) or "raw" not in report or "metadata" not in report:
-        raise ValueError(
-            "report must be a .zip path or a dict returned by "
-            "load_tilde_u_training_approx_report_data."
+        return load_traindata(report)
+    if isinstance(report, TrainingReport):
+        return TrainingReport(
+            data=_drop_legacy_report_dimension_cols(report.data),
+            metadata=_normalize_metadata(report.metadata),
         )
-    report_as_dict = dict(report)
-    report_as_dict["metadata"] = _normalize_tilde_u_report_metadata(report["metadata"])
-    return report_as_dict
+    if not isinstance(report, dict) or "metadata" not in report:
+        raise ValueError(
+            "report must be a .zip path, TrainingReport, or dict with "
+            "data/dataraw/raw and metadata."
+        )
+    # otherwise, assume a dict with "data" and "metadata" keys
+    data = report.get("data", report.get("dataraw", report.get("raw")))
+    if data is None:
+        raise ValueError("report dict must contain data, dataraw, or raw.")
+    return TrainingReport(
+        data=_drop_legacy_report_dimension_cols(data),
+        metadata=_normalize_metadata(report["metadata"]),
+    )
 
 
-def _tilde_u_report_x_col(
+def _xcol_from_metadata(
     metadata: dict,
     x_col: str | None,
 ) -> str:
@@ -485,10 +567,10 @@ def _tilde_u_report_x_col(
     elif sweep_col == "ntr":
         return "ntr"
     else:
-        raise ValueError("Could not infer x_col from saved report data.")
+        raise ValueError("Could not infer x_col from saved traindata metadata.")
 
 
-def _tilde_u_report_summary_quantiles(
+def _summary_quantiles(
     quantiles: Sequence[float] | None,
     quantile_band: tuple[float, float] | None,
 ) -> tuple[float, ...]:
@@ -499,38 +581,6 @@ def _tilde_u_report_summary_quantiles(
     if quantile_band is not None:
         values.extend(float(q) for q in quantile_band)
     return tuple(sorted(set(values)))
-
-
-def _tilde_u_saved_report_plot_raw_df(report_data: dict) -> pd.DataFrame:
-    """Restore compact saved raw data to the columns expected by plot helpers."""
-    raw_df = _drop_legacy_report_dimension_cols(report_data["raw"]).copy()
-    metadata = report_data.get("metadata", {})
-
-    for compact_col, internal_col in _COMPACT_TO_INTERNAL_METRIC_COLS.items():
-        if compact_col in raw_df.columns and internal_col not in raw_df.columns:
-            raw_df[internal_col] = raw_df[compact_col]
-
-    data = metadata.get("data", {})
-    noise = metadata.get("noise", {})
-    target = metadata.get("target", {})
-    test = metadata.get("test", {})
-    constant_cols = {
-        "d": data.get("d"),
-        "nout": data.get("nout"),
-        "ntr": data.get("train_state_count"),
-        "N": noise.get("N"),
-        "noise": noise.get("noise"),
-        "test_state": test.get("state", {}).get("kind"),
-        "target_kind": target.get("observable", {}).get("kind"),
-        "target_normalization": target.get("normalization", "none"),
-    }
-
-    for col, value in constant_cols.items():
-        if col not in raw_df.columns and value is not None:
-            raw_df[col] = value
-    _add_derived_saved_report_metrics(raw_df)
-
-    return raw_df
 
 
 def _has_columns(df: pd.DataFrame, cols: Sequence[str]) -> bool:
@@ -567,8 +617,8 @@ def _add_derived_saved_report_metrics(raw_df: pd.DataFrame) -> None:
             )
 
 
-def summarize_saved_training_data(
-    report: str | Path | dict,
+def summarize_traindata(
+    report: str | Path | dict | TrainingReport,
     *,
     quantiles: Sequence[float] | None = None,
     quantile_band: tuple[float, float] | None = (0.25, 0.75),
@@ -578,26 +628,26 @@ def summarize_saved_training_data(
     Build plotting-ready raw, summary, and slope tables from a saved report.
 
     `report` can be a .zip path or the dictionary returned by
-    `load_tilde_u_training_approx_report_data`. Compact saved reports store
+    `load_traindata`. Compact saved reports store
     user-facing metric names; this helper restores the internal metric columns
     expected by the notebook plotting functions and derives MSE ratios/errors.
     """
-    report_data = _as_tilde_u_training_approx_report_data(report)
-    plot_raw_df = _tilde_u_saved_report_plot_raw_df(report_data)
-    resolved_x_col = _tilde_u_report_x_col(metadata=report_data["metadata"], x_col=x_col)
-    summary_df = summarize_tilde_u_training_approx(
-        plot_raw_df,
-        quantiles=_tilde_u_report_summary_quantiles(quantiles, quantile_band),
+    traindata = _as_traindata(report)
+    expanded_df = traindata.expanded_df()
+    resolved_x_col = _xcol_from_metadata(metadata=traindata.metadata, x_col=x_col)
+    summary_df = summarize_dataraw(
+        expanded_df,
+        quantiles=_summary_quantiles(quantiles, quantile_band),
     )
-    slopes_df = fit_tilde_u_training_approx_slopes(
+    slopes_df = fit_summary_slopes(
         summary_df,
         x_col=resolved_x_col,
-        group_cols=_tilde_u_slope_group_cols(summary_df, resolved_x_col),
+        group_cols=_slope_group_cols(summary_df, resolved_x_col),
     )
-    return plot_raw_df, summary_df, slopes_df
+    return expanded_df, summary_df, slopes_df
 
 
-def render_tilde_u_training_approx_report(
+def render_training_results(
     summary_df: pd.DataFrame,
     slopes_df: pd.DataFrame,
     *,
@@ -618,7 +668,7 @@ def render_tilde_u_training_approx_report(
     ylim: tuple[float | None, float | None] | None = None,
     legend_outside: bool = False
 ) -> None:
-    """Display optional tables and render the configured tilde-U summary plots."""
+    """Display optional tables and render the configured training summary plots."""
     if show_summary:
         display(summary_df)
     if show_slopes:
@@ -626,9 +676,9 @@ def render_tilde_u_training_approx_report(
     if not make_plots:
         return
 
-    resolved_plots = _tilde_u_training_contextualized_plots(
-        _tilde_u_training_approx_plots_from_keys(plots),
-        title_suffix=_tilde_u_training_context_title_suffix(
+    resolved_plots = _contextualized_training_plots(
+        _training_plots_from_keys(plots),
+        title_suffix=_training_context_title_suffix(
             metadata,
             quantile_band=quantile_band,
         ),
@@ -650,8 +700,8 @@ def render_tilde_u_training_approx_report(
     )
 
 
-def plot_saved_training_data(
-    report: str | Path | dict,
+def plot_saved_traindata(
+    report: str | Path | dict | TrainingReport,
     *,
     plots: Sequence[str] | str | None = "mse",
     quantiles: Sequence[float] | None = None,
@@ -671,28 +721,28 @@ def plot_saved_training_data(
     legend_outside=False
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Load or reuse a saved tilde-U report and plot it like the live report.
+    Load or reuse saved training data and plot it like live results.
 
     Example:
-        plot_saved_training_data(
+        plot_saved_traindata(
             "data/mub_haarstates_N1000_vsntr_extended.zip",
             plots="mse",
             quantile_band=(0.10, 0.90),
         )
     """
-    report_data = _as_tilde_u_training_approx_report_data(report)
-    raw_df, summary_df, slopes_df = summarize_saved_training_data(
-        report_data,
+    traindata = _as_traindata(report)
+    raw_df, summary_df, slopes_df = summarize_traindata(
+        traindata,
         quantiles=quantiles,
         quantile_band=quantile_band,
         x_col=x_col,
     )
-    resolved_x_col = _tilde_u_report_x_col(metadata=report_data["metadata"], x_col=x_col)
+    resolved_x_col = _xcol_from_metadata(metadata=traindata.metadata, x_col=x_col)
 
-    render_tilde_u_training_approx_report(
+    render_training_results(
         summary_df,
         slopes_df,
-        metadata=report_data["metadata"],
+        metadata=traindata.metadata,
         x_col=resolved_x_col,
         plots=plots,
         quantile_band=quantile_band,
@@ -711,3 +761,23 @@ def plot_saved_training_data(
     )
 
     return raw_df, summary_df, slopes_df
+
+
+_tilde_u_training_approx_plots_from_keys = _training_plots_from_keys
+_tilde_u_context_povm_label = _context_povm_label
+_tilde_u_povm_label_from_descriptor = _povm_label_from_descriptor
+_tilde_u_context_average_label = _context_average_label
+_tilde_u_context_quantile_label = _context_quantile_label
+_tilde_u_training_context_title_suffix = _training_context_title_suffix
+_tilde_u_training_contextualized_plots = _contextualized_training_plots
+_tilde_u_slope_group_cols = _slope_group_cols
+_normalize_tilde_u_report_metadata = _normalize_metadata
+_as_tilde_u_training_approx_report_data = _as_traindata
+_tilde_u_report_x_col = _xcol_from_metadata
+_tilde_u_report_summary_quantiles = _summary_quantiles
+summarize_tilde_u_training_approx = summarize_dataraw
+fit_tilde_u_training_approx_slopes = fit_summary_slopes
+load_tilde_u_training_approx_report_data = load_traindata
+summarize_saved_training_data = summarize_traindata
+render_tilde_u_training_approx_report = render_training_results
+plot_saved_training_data = plot_saved_traindata

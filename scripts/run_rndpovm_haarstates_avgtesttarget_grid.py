@@ -20,8 +20,8 @@ from qelm import (  # noqa: E402
     QELMTargetRequest,
     QELMTestRequest,
     QELMTrainingSpec,
-    TildeUTrainingApproxStudySpec,
-    run_tilde_u_training_approx_report,
+    TrainingStudySpec,
+    run_training_and_report_results,
 )
 
 
@@ -102,9 +102,9 @@ def _split_work_items(items: list[dict], parts: int) -> list[list[dict]]:
     return chunks
 
 
-def _study_from_item(item: dict) -> TildeUTrainingApproxStudySpec:
+def _study_from_item(item: dict) -> TrainingStudySpec:
     # prepare the study spec for a given work item, ie takes as input parameters
-    # d, nout, N, and sweep_values, and returns a TildeUTrainingApproxStudySpec object
+    # d, nout, N, and sweep_values, and returns a TrainingStudySpec object
     base = QELMTrainingSpec(
         data=QELMDataSpec(
             d=int(item["d"]),
@@ -121,7 +121,7 @@ def _study_from_item(item: dict) -> TildeUTrainingApproxStudySpec:
         ),
     )
 
-    return TildeUTrainingApproxStudySpec(
+    return TrainingStudySpec(
         base=base,
         sweep_col="ntr",
         sweep_values=tuple(int(value) for value in item["sweep_values"]),
@@ -146,7 +146,7 @@ def _run_item(item: dict, *, worker_index: int | None = None) -> dict:
         if worker_index is None
         else f"worker {worker_index}: {_item_label(item)}"
     )
-    run_tilde_u_training_approx_report(
+    run_training_and_report_results(
         study,
         progress_kwargs={
             "desc": bar_desc,

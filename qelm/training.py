@@ -627,8 +627,8 @@ class QELMTrainingAnalysisResult:
 
 
 @dataclass(frozen=True)
-class TildeUTrainingApproxStudySpec:
-    """Declarative sweep specification for tilde-U approximation studies.
+class TrainingStudySpec:
+    """Declarative sweep specification for training-result studies.
 
     `base` is a single `QELMTrainingSpec`; `sweep_col` and `sweep_values`
     generate concrete specs, for example by injecting `num_states` into a
@@ -636,7 +636,7 @@ class TildeUTrainingApproxStudySpec:
     fields control repetitions, summaries, slopes, plotting, and failure mode.
     `plots` accepts "all" or short keys such as "mse", "leading_mse",
     "correction", "bias", "variance", "mse_ratio", "actual_ratio", and
-    "relative_error". If `output_file` is set, `run_tilde_u_training_approx_report`
+    "relative_error". If `output_file` is set, `run_training_and_report_results`
     writes a compact .zip report containing a raw Parquet table and JSON metadata.
     Existing report files are not overwritten unless `overwrite=True`; by
     default, the report writer appends a numeric suffix to the output filename.
@@ -664,6 +664,9 @@ class TildeUTrainingApproxStudySpec:
     fail_soft: bool = False
     output_file: str | PathLike[str] | None = None
     overwrite: bool = False
+
+
+TildeUTrainingApproxStudySpec = TrainingStudySpec
 
 
 @dataclass

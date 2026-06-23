@@ -57,7 +57,7 @@ from .training import (
     ResolvedTarget,
     ResolvedTest,
     TildeUDiagnostics,
-    TildeUTrainingApproxStudySpec,
+    TrainingStudySpec,
     _povm_kind_from_spec,
     _required_noise_N,
     _resolve_test_state_request,
@@ -70,31 +70,30 @@ from .training import (
     with_training_sweep_value,
 )
 from .training_reports import (
-    TILDE_U_TRAINING_APPROX_METRIC_COLS,
-    TILDE_U_TRAINING_APPROX_PLOT_SPECS,
-    TILDE_U_TRAINING_APPROX_PLOTS,
-    TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS,
+    TRAINING_METRIC_COLS,
+    TRAINING_PLOT_SPECS,
+    TRAINING_PLOTS,
+    TRAINING_SAVED_METRIC_COLS,
     _array_from_payload,
-    _as_tilde_u_training_approx_report_data,
-    _normalize_tilde_u_report_metadata,
+    _as_traindata,
+    _normalize_metadata,
     _read_portable_dataframe_bytes,
-    _tilde_u_context_average_label,
-    _tilde_u_context_povm_label,
-    _tilde_u_context_quantile_label,
-    _tilde_u_povm_label_from_descriptor,
-    _tilde_u_report_summary_quantiles,
-    _tilde_u_report_x_col,
-    _tilde_u_saved_report_plot_raw_df,
-    _tilde_u_slope_group_cols,
-    _tilde_u_training_approx_plots_from_keys,
-    _tilde_u_training_context_title_suffix,
-    _tilde_u_training_contextualized_plots,
-    fit_tilde_u_training_approx_slopes,
-    load_tilde_u_training_approx_report_data,
-    plot_saved_training_data,
-    render_tilde_u_training_approx_report,
-    summarize_saved_training_data,
-    summarize_tilde_u_training_approx,
+    _context_average_label,
+    _context_povm_label,
+    _context_quantile_label,
+    _povm_label_from_descriptor,
+    _summary_quantiles,
+    _xcol_from_metadata,
+    _slope_group_cols,
+    _training_plots_from_keys,
+    _training_context_title_suffix,
+    _contextualized_training_plots,
+    fit_summary_slopes,
+    load_traindata,
+    plot_saved_traindata,
+    render_training_results,
+    summarize_traindata,
+    summarize_dataraw,
 )
 from .trials import run_trials, summarize_trials
 
@@ -811,8 +810,8 @@ def run_schur_complement_approx_experiment(
     return raw_df, summary_df
 
 
-def _tilde_u_study_x_col(study: TildeUTrainingApproxStudySpec) -> str:
-    """Resolve the x-axis column used by live tilde-U report plots."""
+def _study_xcol(study: TrainingStudySpec) -> str:
+    """Resolve the x-axis column used by live training-result plots."""
     if study.x_col is not None:
         return study.x_col
     elif study.sweep_col == "nout":
@@ -825,8 +824,8 @@ def _tilde_u_study_x_col(study: TildeUTrainingApproxStudySpec) -> str:
         raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
 
 
-def _tilde_u_study_sweep_values(study: TildeUTrainingApproxStudySpec) -> tuple[int, ...]:
-    """Return explicit sweep values for a live tilde-U study configuration."""
+def _study_sweep_values(study: TrainingStudySpec) -> tuple[int, ...]:
+    """Return explicit sweep values for a live training study configuration."""
     if study.sweep_values is not None:
         return tuple(int(value) for value in study.sweep_values)
     if study.sweep_col == "ntr":
@@ -841,10 +840,10 @@ def _tilde_u_study_sweep_values(study: TildeUTrainingApproxStudySpec) -> tuple[i
     raise ValueError("sweep_col must be 'ntr', 'nout', or 'N'.")
 
 
-def _tilde_u_configs_from_study(study: TildeUTrainingApproxStudySpec) -> list[dict]:
+def _training_configs_from_study(study: TrainingStudySpec) -> list[dict]:
     """Build per-sweep trial configs consumed by run_repeated_trials."""
     configs = []
-    for value in _tilde_u_study_sweep_values(study):
+    for value in _study_sweep_values(study):
         spec = with_training_sweep_value(study.base, study.sweep_col, value)
         ntr = _training_state_count_from_spec(spec.data.train_states)
         N = _required_noise_N(spec.noise)
@@ -860,13 +859,13 @@ def _tilde_u_configs_from_study(study: TildeUTrainingApproxStudySpec) -> list[di
     return configs
 
 
-def _tilde_u_report_output_path(output_file: str | Path) -> Path:
-    """Normalize and validate the .zip output path for a live tilde-U report."""
+def _traindata_output_path(output_file: str | Path) -> Path:
+    """Normalize and validate the .zip output path for saved traindata."""
     path = Path(output_file).expanduser()
     if path.suffix == "":
         path = path.with_suffix(".zip")
     if path.suffix.lower() != ".zip":
-        raise ValueError("tilde-U report output_file must end in .zip.")
+        raise ValueError("training output_file must end in .zip.")
     return path
 
 
@@ -1044,7 +1043,7 @@ def _target_descriptor(observable, *, dim: int, nout: int | None) -> dict:
     return {"kind": type(observable).__name__, "value": _selector_descriptor(observable)}
 
 
-def _tilde_u_saved_raw_df(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFrame:
+def _saved_dataraw(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFrame:
     """Reduce live raw trial data to compact columns before report serialization."""
     cols = ["trial"]
     if sweep_col in raw_df.columns:
@@ -1052,19 +1051,19 @@ def _tilde_u_saved_raw_df(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFra
     if "failed" in raw_df.columns and raw_df["failed"].fillna(False).any():
         cols.append("failed")
     cols.extend(
-        col for col in TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS
+        col for col in TRAINING_SAVED_METRIC_COLS
         if col in raw_df.columns
     )
-    return raw_df.loc[:, cols].rename(columns=TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS)
+    return raw_df.loc[:, cols].rename(columns=TRAINING_SAVED_METRIC_COLS)
 
 
-def _save_tilde_u_training_approx_report_zip(
+def _save_traindata_zip(
     path: Path,
     *,
-    raw_df: pd.DataFrame,
+    dataraw: pd.DataFrame,
     metadata: dict,
 ) -> Path:
-    """Write compact raw data and metadata to a portable tilde-U report zip."""
+    """Write compact raw data and metadata to a portable traindata zip."""
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {
         "tables": {
@@ -1074,7 +1073,7 @@ def _save_tilde_u_training_approx_report_zip(
     }
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        archive.writestr("raw.parquet", _portable_dataframe_bytes(raw_df))
+        archive.writestr("raw.parquet", _portable_dataframe_bytes(dataraw))
         archive.writestr(
             "metadata.json",
             json.dumps(metadata, indent=2, sort_keys=True),
@@ -1082,34 +1081,34 @@ def _save_tilde_u_training_approx_report_zip(
     return path
 
 
-def _save_tilde_u_training_approx_report_data(
+def _save_traindata(
     output_file: str | Path,
     *,
-    raw_df: pd.DataFrame,
+    dataraw: pd.DataFrame,
     metadata: dict,
     overwrite: bool = False,
 ) -> Path:
-    """Save a live tilde-U report, choosing a fresh filename unless overwriting."""
-    path = _tilde_u_report_output_path(output_file)
+    """Save live training results, choosing a fresh filename unless overwriting."""
+    path = _traindata_output_path(output_file)
     if not overwrite:
         path = _noncolliding_output_path(path)
-    return _save_tilde_u_training_approx_report_zip(
+    return _save_traindata_zip(
         path,
-        raw_df=raw_df,
+        dataraw=dataraw,
         metadata=metadata,
     )
 
 
-def _tilde_u_training_approx_report_metadata(
-    study: TildeUTrainingApproxStudySpec,
+def _training_metadata(
+    study: TrainingStudySpec,
     *,
     started_at: datetime,
     completed_at: datetime,
     elapsed_seconds: float,
 ) -> dict:
-    """Build the metadata block saved with live tilde-U report archives."""
+    """Build the metadata block saved with live training-result archives."""
     base = study.base
-    sweep_values = _tilde_u_study_sweep_values(study)
+    sweep_values = _study_sweep_values(study)
     data = {
         "d": int(base.data.d),
         "nout": None if base.data.nout is None else int(base.data.nout),
@@ -1157,7 +1156,7 @@ def _tilde_u_training_approx_report_metadata(
     }
 
 
-def _tilde_u_trial_row(
+def _training_trial_row(
     *,
     d: int,
     ntr: int,
@@ -1171,7 +1170,7 @@ def _tilde_u_trial_row(
     identity: dict,
     actual: dict,
 ) -> dict:
-    """Assemble one live tilde-U trial's diagnostics into a raw-results row."""
+    """Assemble one live training trial's diagnostics into a raw-results row."""
     eps = 1e-15
     row = {
         "d": d,
@@ -1211,14 +1210,14 @@ def _tilde_u_trial_row(
     return row
 
 
-def one_tilde_u_training_approx_trial_from_spec(
+def one_training_trial_from_spec(
     *,
     spec: QELMTrainingSpec,
     rng: np.random.Generator | int | None = None,
     **_,
 ) -> dict:
     """
-    One tilde-U approximation trial from a structured QELMTrainingSpec.
+    One training trial from a structured QELMTrainingSpec.
     """
     rng = get_rng(rng)
     r = spec.data.d * spec.data.d if spec.numerics.rank is None else int(spec.numerics.rank)
@@ -1234,7 +1233,7 @@ def one_tilde_u_training_approx_trial_from_spec(
     if ntr < spec.data.nout:
         raise ValueError(f"Need ntr >= nout. Got ntr={ntr}, nout={spec.data.nout}.")
 
-    return _tilde_u_trial_row(
+    return _training_trial_row(
         d=spec.data.d,
         ntr=ntr,
         N=_required_noise_N(spec.noise),
@@ -1249,25 +1248,25 @@ def one_tilde_u_training_approx_trial_from_spec(
     )
 
 
-def run_tilde_u_training_approx_experiment(
-    study: TildeUTrainingApproxStudySpec,
+def run_training_experiment(
+    study: TrainingStudySpec,
     *,
     progress_kwargs: dict | None = None,
     print_elapsed: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Run raw and summarized trials for a tilde-U approximation study.
+    Run raw and summarized trials for a training study.
 
-    This calls one_tilde_u_training_approx_trial_from_spec repeatedly,
+    This calls one_training_trial_from_spec repeatedly,
     passing it a QELMTrainingSpec with the sweep value set for each trial.
-    We use _tilde_u_configs_from_study to convert the TildeUTrainingApproxStudySpec
+    We use _training_configs_from_study to convert the TrainingStudySpec
     into a list of trial configurations and in particular the QELMTrainingSpec for each trial.
     """
     if study.repetitions <= 0:
         raise ValueError("repetitions must be positive.")
     raw_df = run_repeated_trials(
-        trial_fn=one_tilde_u_training_approx_trial_from_spec,
-        configs=_tilde_u_configs_from_study(study),
+        trial_fn=one_training_trial_from_spec,
+        configs=_training_configs_from_study(study),
         trials=study.repetitions,
         seed=study.seed,
         rng_arg="rng",
@@ -1277,42 +1276,42 @@ def run_tilde_u_training_approx_experiment(
         print_elapsed=print_elapsed,
         fail_soft=study.fail_soft,
     )
-    summary_df = summarize_tilde_u_training_approx(
+    summary_df = summarize_dataraw(
         raw_df,
         quantiles=study.quantiles,
     )
     return raw_df, summary_df
 
 
-def run_tilde_u_training_approx_report(
-    study: TildeUTrainingApproxStudySpec,
+def run_training_and_report_results(
+    study: TrainingStudySpec,
     *,
     progress_kwargs: dict | None = None,
     quiet: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Notebook-friendly report for a tilde-U approximation study.
+    Notebook-friendly report for a training study.
     """
     if study.output_file is not None:
-        _tilde_u_report_output_path(study.output_file)
+        _traindata_output_path(study.output_file)
 
     started_at = datetime.now().astimezone()
     start_time = perf_counter()
-    raw_df, summary_df = run_tilde_u_training_approx_experiment(
+    raw_df, summary_df = run_training_experiment(
         study,
         progress_kwargs=progress_kwargs,
         print_elapsed=not quiet,
     )
-    resolved_x_col = _tilde_u_study_x_col(study)
-    slopes_df = fit_tilde_u_training_approx_slopes(
+    resolved_x_col = _study_xcol(study)
+    slopes_df = fit_summary_slopes(
         summary_df,
         x_col=resolved_x_col,
         ycols=study.slope_ycols,
-        group_cols=_tilde_u_slope_group_cols(summary_df, resolved_x_col),
+        group_cols=_slope_group_cols(summary_df, resolved_x_col),
     )
     elapsed_seconds = perf_counter() - start_time
     completed_at = datetime.now().astimezone()
-    metadata = _tilde_u_training_approx_report_metadata(
+    metadata = _training_metadata(
         study,
         started_at=started_at,
         completed_at=completed_at,
@@ -1320,16 +1319,16 @@ def run_tilde_u_training_approx_report(
     )
 
     if study.output_file is not None:
-        saved_path = _save_tilde_u_training_approx_report_data(
+        saved_path = _save_traindata(
             study.output_file,
-            raw_df=_tilde_u_saved_raw_df(raw_df, sweep_col=study.sweep_col),
+            dataraw=_saved_dataraw(raw_df, sweep_col=study.sweep_col),
             metadata=metadata,
             overwrite=study.overwrite,
         )
         if study.verbose and not quiet:
-            print(f"Saved tilde-U report data to {saved_path}")
+            print(f"Saved training data to {saved_path}")
 
-    render_tilde_u_training_approx_report(
+    render_training_results(
         summary_df,
         slopes_df,
         metadata=metadata,
@@ -1342,6 +1341,11 @@ def run_tilde_u_training_approx_report(
     )
 
     return raw_df, summary_df, slopes_df
+
+
+one_tilde_u_training_approx_trial_from_spec = one_training_trial_from_spec
+run_tilde_u_training_approx_experiment = run_training_experiment
+run_tilde_u_training_approx_report = run_training_and_report_results
 
 
 def one_schur_correction_trial(
