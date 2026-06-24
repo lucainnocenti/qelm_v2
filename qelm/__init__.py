@@ -41,6 +41,7 @@ from .plotting import (
     plot_metric_vs_kappa,
     plot_metric_vs_predictors,
     plot_mean_median_quantile_summary,
+    plot_mse_grid_over_N,
     plot_random_quantum_scaling,
     plot_summary_series,
     plot_sweep_diagnostics,

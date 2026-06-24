@@ -767,3 +767,240 @@ def plot_random_quantum_scaling(
                 xlabel=x_col,
                 ylabel=quantity,
             )
+
+
+from pathlib import Path
+import math
+import matplotlib.pyplot as plt
+
+
+def _default_log_yticks_and_labels(ymin, ymax):
+    """
+    Return base-10 ticks between ymin and ymax, with the bottom/top labels hidden.
+    Assumes positive log-scale limits.
+    """
+    kmin = math.ceil(math.log10(ymin))
+    kmax = math.floor(math.log10(ymax))
+
+    yticks = [10.0**k for k in range(kmin, kmax + 1)]
+    yticklabels = [rf"$10^{{{k}}}$" for k in range(kmin, kmax + 1)]
+
+    if len(yticklabels) >= 1:
+        yticklabels[0] = ""
+    if len(yticklabels) >= 2:
+        yticklabels[-1] = ""
+
+    return yticks, yticklabels
+
+
+def plot_mse_grid_over_N(
+    folder,
+    *,
+    d=2,
+    nout=16,
+    n_min=2,
+    n_max=13,
+    ncols=3,
+    xlim=(15, None),
+    ylim=(1e-7, 10),
+    plots="mse",
+    quantile_band=(0.05, 0.95),
+    show_mean=False,
+    n_realizations=1000,
+    figsize_per_panel=(5.0, 3.5),
+    title=None,
+    filename_template="_d{d}_nout{nout}_N{N}_vsntr.zip",
+    plot_func=None,
+    title_fontsize=20,
+    panel_title_fontsize=14,
+    tick_labelsize=12,
+    axis_labelsize=18,
+    legend_fontsize=14,
+    legend_loc="lower left",
+    title_y=0.995,
+    margins=None,
+):
+    """
+    Plot saved training curves for files indexed by N = 2**n.
+
+    Parameters
+    ----------
+    folder : str or Path
+        Folder containing files of the form specified by filename_template.
+
+    d : int
+        Hilbert-space dimension used in filename/title.
+
+    nout : int
+        Number of POVM outcomes used in filename/title.
+
+    n_min, n_max : int
+        Plot N = 2**n for n_min <= n <= n_max.
+
+    ncols : int
+        Number of subplot columns.
+
+    xlim, ylim : tuple
+        Axis limits passed to plot_func.
+
+    filename_template : str
+        Template for filenames. Available fields: d, nout, N.
+
+    plot_func : callable or None
+        Plotting function. If None, uses the global plot_saved_traindata.
+
+    Returns
+    -------
+    fig, axes
+        Matplotlib figure and flattened axes array.
+    """
+    if plot_func is None:
+        from .training_reports import plot_saved_traindata
+
+        plot_func = plot_saved_traindata
+
+    folder = Path(folder)
+
+    Ns = [2**n for n in range(n_min, n_max + 1)]
+    paths = [
+        folder / filename_template.format(d=d, nout=nout, N=N)
+        for N in Ns
+    ]
+
+    nrows = math.ceil(len(paths) / ncols)
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * nrows),
+        sharex=True,
+        sharey=True,
+        gridspec_kw={
+            "wspace": 0.0,
+            "hspace": 0.0,
+        },
+    )
+
+    axes = np.asarray(axes).ravel()
+
+    ymin, ymax = ylim
+    yticks, yticklabels = _default_log_yticks_and_labels(ymin, ymax)
+
+    for i, (ax, N, path) in enumerate(zip(axes, Ns, paths)):
+        row = i // ncols
+        col = i % ncols
+
+        plot_func(
+            path,
+            plots=plots,
+            quantile_band=quantile_band,
+            xlim=xlim,
+            ylim=ylim,
+            show_mean=show_mean,
+            ax=ax,
+        )
+
+        ax.set_title("")
+
+        # Panel title inside plot
+        ax.text(
+            0.5,
+            0.95,
+            rf"$N={N}$",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=panel_title_fontsize,
+            bbox=dict(
+                facecolor="white",
+                alpha=0.75,
+                edgecolor="none",
+                pad=1.5,
+            ),
+        )
+
+        ax.tick_params(
+            axis="both",
+            which="both",
+            labelsize=tick_labelsize,
+            direction="in",
+            top=True,
+            right=True,
+        )
+
+        # Labels only on outer axes
+        if row == nrows - 1:
+            ax.xaxis.label.set_size(axis_labelsize)
+        else:
+            ax.set_xlabel("")
+            ax.tick_params(labelbottom=False)
+
+        if col == 0:
+            ax.yaxis.label.set_size(axis_labelsize)
+        else:
+            ax.set_ylabel("")
+            ax.tick_params(labelleft=False)
+
+        # Keep legend only in the first subplot
+        leg = ax.get_legend()
+
+        if i == 0:
+            handles, labels = ax.get_legend_handles_labels()
+
+            if leg is not None:
+                leg.remove()
+
+            if handles and labels:
+                ax.legend(
+                    handles,
+                    labels,
+                    fontsize=legend_fontsize,
+                    loc=legend_loc,
+                    framealpha=0.75,
+                )
+        else:
+            if leg is not None:
+                leg.remove()
+
+        # Fixed y-limits and suppressed boundary tick labels
+        ax.set_ylim(ymin, ymax)
+        ax.set_yticks(yticks)
+
+        if col == 0:
+            ax.set_yticklabels(yticklabels)
+
+    # Hide unused axes
+    for ax in axes[len(paths):]:
+        ax.set_visible(False)
+
+    if title is None:
+        quantile_label = ""
+        if quantile_band is not None:
+            qlo, qhi = quantile_band
+            quantile_label = f", q{100 * qlo:g}-q{100 * qhi:g}"
+
+        title = (
+            rf"MSE for random rank-1 POVMs, Haar states, "
+            rf"$d={d}$, $n_{{\mathrm{{out}}}}={nout}$, "
+            rf"${n_realizations}$ realizations{quantile_label}"
+        )
+
+    fig.suptitle(
+        title,
+        fontsize=title_fontsize,
+        y=title_y,
+    )
+
+    if margins is None:
+        margins = dict(
+            left=0.065,
+            right=0.995,
+            bottom=0.055,
+            top=0.96,
+            wspace=0.0,
+            hspace=0.0,
+        )
+
+    fig.subplots_adjust(**margins)
+
+    return fig, axes
