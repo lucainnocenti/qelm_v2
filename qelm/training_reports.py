@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from io import BytesIO
 import json
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 from zipfile import ZipFile
 
 import numpy as np
@@ -24,6 +24,21 @@ except ImportError:  # pragma: no cover - plain Python fallback
         print(obj)
 
 
+@dataclass(frozen=True)
+class MetricExpr:
+    """A lazily materialized training metric column."""
+
+    name: str
+    deps: tuple[str, ...]
+    compute: Callable[[pd.DataFrame], object]
+
+
+# Ordered public metric schema used by summarize_dataraw(), fit_summary_slopes(),
+# and the saved-report plotting helpers. Each string is a DataFrame column name:
+# raw columns may come directly from a simulation report, while derived columns
+# such as leading_mse_exact or mse_identity_over_exact are reconstructed from the
+# MetricExpr registry below when TrainingReport.expanded_df() loads compact saved
+# data. The order controls display/table ordering; it is not a dependency order.
 TRAINING_METRIC_COLS = [
     "C22_inv_C21_op",
     "correction_op",
@@ -45,8 +60,17 @@ TRAINING_METRIC_COLS = [
     "actual_over_leading_identity",
     "leading_exact_relative_error",
     "leading_identity_relative_error",
+    "leading_mse_identity_minus_exact_times_N",
+    "leading_mse_identity_minus_exact_times_N2",
 ]
 
+# Registry of named training plots. The dict key is the user-facing plot selector
+# accepted by plot_saved_traindata(plots=...). Each value is a 3-tuple:
+#   (series_specs, title, ylabel)
+# where series_specs is a list of (metric, legend_label) pairs. A metric can be a
+# plain DataFrame column name or a MetricExpr for an ad hoc computed quantity.
+# MetricExpr objects are materialized into raw data before summarization, then
+# replaced by their .name before calling plot_grouped_mean_median_quantile_summary().
 TRAINING_PLOT_SPECS = {
     "correction": (
         [
@@ -94,6 +118,32 @@ TRAINING_PLOT_SPECS = {
         "Effect of dropping the C22 correction in the leading MSE",
         "identity leading MSE / corrected leading MSE",
     ),
+    "leading_mse_delta_N": (
+        [
+            (
+                "leading_mse_identity_minus_exact_times_N",
+                r"$N(\mathrm{identity}-\mathrm{corrected})$",
+            )
+        ],
+        r"Leading-MSE change from $\tilde U U_1^T = I$",
+        (
+            r"$N\left(\mathrm{MSE}_{\tilde U U_1^T=I}^{\mathrm{lead}}"
+            r"-\mathrm{MSE}_{\mathrm{full}}^{\mathrm{lead}}\right)$"
+        ),
+    ),
+    "leading_mse_delta_N2": (
+        [
+            (
+                "leading_mse_identity_minus_exact_times_N2",
+                r"$N^2(\mathrm{identity}-\mathrm{corrected})$",
+            )
+        ],
+        r"$N^2$-rescaled leading-MSE change from $\tilde U U_1^T = I$",
+        (
+            r"$N^2\left(\mathrm{MSE}_{\tilde U U_1^T=I}^{\mathrm{lead}}"
+            r"-\mathrm{MSE}_{\mathrm{full}}^{\mathrm{lead}}\right)$"
+        ),
+    ),
     "actual_ratio": (
         [
             ("actual_over_leading_exact", "actual / corrected leading"),
@@ -111,8 +161,16 @@ TRAINING_PLOT_SPECS = {
         "|leading MSE - numerical MSE| / numerical MSE",
     ),
 }
+# Backward-compatible list form of TRAINING_PLOT_SPECS values. Passing plots=None
+# resolves to this list, and older callers can still pass these already-expanded
+# (series_specs, title, ylabel) tuples instead of named plot keys.
 TRAINING_PLOTS = list(TRAINING_PLOT_SPECS.values())
 
+# Internal-to-saved metric-name mapping for report serialization. Keys are the
+# canonical names used everywhere in this module; values are the shorter column
+# names found in saved JSON/ZIP reports. TrainingReport.expanded_df() applies the
+# reverse map (_COMPACT_TO_INTERNAL_METRIC_COLS) so downstream code only sees the
+# canonical names, regardless of how the report was stored on disk.
 TRAINING_SAVED_METRIC_COLS = {
     "leading_bias_sq_exact": "leading_bias_sq",
     "leading_var_exact": "leading_variance",
@@ -123,34 +181,134 @@ TRAINING_SAVED_METRIC_COLS = {
     "actual_variance": "variance",
 }
 
+# Historical aliases for the earlier tilde-U approximation API. They point to the
+# same list/dict objects rather than copies, so adding a training metric or plot
+# keeps old notebooks and scripts in sync with the generalized training helpers.
 TILDE_U_TRAINING_APPROX_METRIC_COLS = TRAINING_METRIC_COLS
 TILDE_U_TRAINING_APPROX_PLOT_SPECS = TRAINING_PLOT_SPECS
 TILDE_U_TRAINING_APPROX_PLOTS = TRAINING_PLOTS
 TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
 
+# Private aliases for loader internals. _SAVED_METRIC_COLS names the map used by
+# the report loader, while _COMPACT_TO_INTERNAL_METRIC_COLS reverses it from
+# saved-column -> canonical-column for fast column renaming during expansion.
 _SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
 _COMPACT_TO_INTERNAL_METRIC_COLS = {
     compact: internal for internal, compact in _SAVED_METRIC_COLS.items()
 }
-_ADDITIVE_METRIC_COLS = {
-    "leading_mse_exact": ("leading_bias_sq_exact", "leading_var_exact"),
-    "leading_mse_identity": ("leading_bias_sq_identity", "leading_var_identity"),
-}
-_RATIO_METRIC_COLS = {
-    "bias_sq_identity_over_exact": (
-        "leading_bias_sq_identity",
-        "leading_bias_sq_exact",
-    ),
-    "var_identity_over_exact": ("leading_var_identity", "leading_var_exact"),
-    "mse_identity_over_exact": ("leading_mse_identity", "leading_mse_exact"),
-    "actual_over_leading_exact": ("actual_mse", "leading_mse_exact"),
-    "actual_over_leading_identity": ("actual_mse", "leading_mse_identity"),
-}
-_RELATIVE_ERROR_METRIC_COLS = {
-    "leading_exact_relative_error": ("leading_mse_exact", "actual_mse"),
-    "leading_identity_relative_error": ("leading_mse_identity", "actual_mse"),
-}
+
+# Small positive floor used by _safe_denominator(). Ratios and relative errors can
+# be plotted on log scales, so denominators at or below machine-zero are clamped
+# to this value instead of producing infinities or division-by-zero warnings.
 _EPS = 1e-15
+
+# Built-in derived metric registry. Each key is the output column name, and each
+# MetricExpr stores the input column dependencies plus the computation used by
+# _ensure_metric_column(). Dependencies may themselves be derived metrics, so this
+# single registry replaces the older operation-specific maps and dependency map.
+# New named derived metrics can be added here, while one-off plots can pass a
+# MetricExpr directly in their series_specs without changing any module constant.
+DERIVED_TRAINING_METRICS = {
+    "leading_mse_exact": MetricExpr(
+        "leading_mse_exact",
+        ("leading_bias_sq_exact", "leading_var_exact"),
+        lambda df: df["leading_bias_sq_exact"] + df["leading_var_exact"],
+    ),
+    "leading_mse_identity": MetricExpr(
+        "leading_mse_identity",
+        ("leading_bias_sq_identity", "leading_var_identity"),
+        lambda df: df["leading_bias_sq_identity"] + df["leading_var_identity"],
+    ),
+    "bias_sq_identity_over_exact": MetricExpr(
+        "bias_sq_identity_over_exact",
+        ("leading_bias_sq_identity", "leading_bias_sq_exact"),
+        lambda df: (
+            df["leading_bias_sq_identity"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_bias_sq_exact"])
+        ),
+    ),
+    "var_identity_over_exact": MetricExpr(
+        "var_identity_over_exact",
+        ("leading_var_identity", "leading_var_exact"),
+        lambda df: (
+            df["leading_var_identity"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_var_exact"])
+        ),
+    ),
+    "mse_identity_over_exact": MetricExpr(
+        "mse_identity_over_exact",
+        ("leading_mse_identity", "leading_mse_exact"),
+        lambda df: (
+            df["leading_mse_identity"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_mse_exact"])
+        ),
+    ),
+    "actual_over_leading_exact": MetricExpr(
+        "actual_over_leading_exact",
+        ("actual_mse", "leading_mse_exact"),
+        lambda df: (
+            df["actual_mse"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_mse_exact"])
+        ),
+    ),
+    "actual_over_leading_identity": MetricExpr(
+        "actual_over_leading_identity",
+        ("actual_mse", "leading_mse_identity"),
+        lambda df: (
+            df["actual_mse"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_mse_identity"])
+        ),
+    ),
+    "leading_exact_relative_error": MetricExpr(
+        "leading_exact_relative_error",
+        ("leading_mse_exact", "actual_mse"),
+        lambda df: (
+            np.abs(
+                df["leading_mse_exact"].to_numpy(dtype=float)
+                - df["actual_mse"].to_numpy(dtype=float)
+            )
+            / _safe_denominator(df["actual_mse"])
+        ),
+    ),
+    "leading_identity_relative_error": MetricExpr(
+        "leading_identity_relative_error",
+        ("leading_mse_identity", "actual_mse"),
+        lambda df: (
+            np.abs(
+                df["leading_mse_identity"].to_numpy(dtype=float)
+                - df["actual_mse"].to_numpy(dtype=float)
+            )
+            / _safe_denominator(df["actual_mse"])
+        ),
+    ),
+    "leading_mse_identity_minus_exact_times_N": MetricExpr(
+        "leading_mse_identity_minus_exact_times_N",
+        ("leading_mse_identity", "leading_mse_exact", "N"),
+        lambda df: (
+            df["N"].to_numpy(dtype=float)
+            * (
+                df["leading_mse_identity"].to_numpy(dtype=float)
+                - df["leading_mse_exact"].to_numpy(dtype=float)
+            )
+        ),
+    ),
+    "leading_mse_identity_minus_exact_times_N2": MetricExpr(
+        "leading_mse_identity_minus_exact_times_N2",
+        ("leading_mse_identity", "leading_mse_exact", "N"),
+        lambda df: (
+            df["N"].to_numpy(dtype=float) ** 2
+            * (
+                df["leading_mse_identity"].to_numpy(dtype=float)
+                - df["leading_mse_exact"].to_numpy(dtype=float)
+            )
+        ),
+    ),
+}
+
+# Report-dimension columns written by older raw-data formats. Current reports store
+# these values in metadata and TrainingReport.expanded_df() re-adds them as needed;
+# _drop_legacy_report_dimension_cols() removes stale in-table copies first to keep
+# grouping keys unambiguous.
 _LEGACY_REPORT_DIMENSION_COLS = ("r", "q", "p_kernel")
 
 
@@ -166,7 +324,11 @@ class TrainingReport:
         """Return a plain dict representation with data and metadata."""
         return {"data": self.data, "metadata": self.metadata}
 
-    def expanded_df(self) -> pd.DataFrame:
+    def expanded_df(
+        self,
+        *,
+        metric_cols: Sequence[str | MetricExpr] | None = None,
+    ) -> pd.DataFrame:
         """Return raw data expanded with metadata constants and derived metrics."""
         raw_df = _drop_legacy_report_dimension_cols(self.data).copy()
 
@@ -192,7 +354,7 @@ class TrainingReport:
         for col, value in constant_cols.items():
             if col not in raw_df.columns and value is not None:
                 raw_df[col] = value
-        _add_derived_saved_report_metrics(raw_df)
+        _add_derived_saved_report_metrics(raw_df, metric_cols=metric_cols)
 
         return raw_df
 
@@ -202,6 +364,7 @@ class TrainingReport:
         quantiles: Sequence[float] | None = None,
         quantile_band: tuple[float, float] | None = (0.25, 0.75),
         x_col: str | None = None,
+        metric_cols: Sequence[str | MetricExpr] | None = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Build plotting-ready raw, summary, and slope tables."""
         return summarize_traindata(
@@ -209,6 +372,7 @@ class TrainingReport:
             quantiles=quantiles,
             quantile_band=quantile_band,
             x_col=x_col,
+            metric_cols=metric_cols,
         )
 
     def plot(
@@ -225,25 +389,80 @@ def _drop_legacy_report_dimension_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _training_plots_from_keys(
-    plots: Sequence[str] | str | None,
+    plots: Sequence | str | None,
 ) -> list[tuple]:
-    """Resolve short plot keys from report options into concrete plot specs."""
+    """Resolve short plot keys or already-expanded plot specs."""
     if plots is None:
         return []
     if isinstance(plots, str):
-        keys = (plots,)
+        items = (plots,)
+    elif _is_training_plot_spec(plots):
+        return [plots]
     else:
-        keys = tuple(plots)
+        items = tuple(plots)
 
-    if not keys or "all" in keys:
+    if not items:
         return TRAINING_PLOTS
 
-    unknown = tuple(key for key in keys if key not in TRAINING_PLOT_SPECS)
+    if any(item == "all" for item in items if isinstance(item, str)):
+        return TRAINING_PLOTS
+
+    resolved = []
+    unknown = []
+    for item in items:
+        if _is_training_plot_spec(item):
+            resolved.append(item)
+        elif isinstance(item, str) and item in TRAINING_PLOT_SPECS:
+            resolved.append(TRAINING_PLOT_SPECS[item])
+        else:
+            unknown.append(item)
+
     if unknown:
         available = ", ".join(("all", *TRAINING_PLOT_SPECS))
         raise ValueError(f"Unknown training plot key(s): {unknown}. Available keys: {available}.")
 
-    return [TRAINING_PLOT_SPECS[key] for key in keys]
+    return resolved
+
+
+def _is_training_plot_spec(value: object) -> bool:
+    """Return whether value has the resolved training plot tuple shape."""
+    return (
+        isinstance(value, tuple)
+        and len(value) == 3
+        and isinstance(value[0], (list, tuple))
+    )
+
+
+def _metric_name(metric: str | MetricExpr) -> str:
+    """Return the concrete DataFrame column name for a metric spec."""
+    return metric.name if isinstance(metric, MetricExpr) else metric
+
+
+def _metric_specs_from_plot_specs(plots: Sequence[tuple]) -> tuple[str | MetricExpr, ...]:
+    """Extract unique metric specs used by resolved training plot specs."""
+    metric_specs = []
+    seen = set()
+    for series_specs, _title, _ylabel in plots:
+        for metric, _label in series_specs:
+            name = _metric_name(metric)
+            if name not in seen:
+                metric_specs.append(metric)
+                seen.add(name)
+    return tuple(metric_specs)
+
+
+def _plot_specs_with_metric_names(plots: Sequence[tuple]) -> list[tuple]:
+    """Replace MetricExpr entries in plot specs with concrete column names."""
+    resolved = []
+    for series_specs, title, ylabel in plots:
+        resolved.append(
+            (
+                [(_metric_name(metric), label) for metric, label in series_specs],
+                title,
+                ylabel,
+            )
+        )
+    return resolved
 
 
 def _context_povm_label(data: dict, sweep_col: str | None) -> str:
@@ -381,6 +600,7 @@ def summarize_dataraw(
     raw_df: pd.DataFrame,
     *,
     quantiles: Sequence[float] = (0.25, 0.75),
+    metric_cols: Sequence[str | MetricExpr] | None = None,
     group_cols: Sequence[str] = (
         "d",
         "nout",
@@ -399,6 +619,7 @@ def summarize_dataraw(
     rows = []
     ok = raw_df[~raw_df.get("failed", False).astype(bool)].copy() if "failed" in raw_df else raw_df
     active_group_cols = tuple(col for col in group_cols if col in ok.columns)
+    active_metric_cols = _summary_metric_cols(metric_cols)
 
     for key, group in ok.groupby(list(active_group_cols), dropna=False):
         if not isinstance(key, tuple):
@@ -414,7 +635,7 @@ def summarize_dataraw(
         if "C22_kept_rank" in group.columns:
             row["C22_kept_rank_min"] = int(group["C22_kept_rank"].min())
 
-        for col in TRAINING_METRIC_COLS:
+        for col in active_metric_cols:
             if col not in group.columns:
                 continue
             stats = distribution_summary(group[col].to_numpy(dtype=float), quantiles=quantiles)
@@ -588,33 +809,78 @@ def _has_columns(df: pd.DataFrame, cols: Sequence[str]) -> bool:
     return set(cols) <= set(df.columns)
 
 
+def _summary_metric_cols(
+    metric_cols: Sequence[str | MetricExpr] | None,
+) -> tuple[str, ...]:
+    """Return built-in summary metrics plus any requested ad hoc metrics."""
+    if metric_cols is None:
+        return tuple(TRAINING_METRIC_COLS)
+    return tuple(
+        dict.fromkeys(
+            (*TRAINING_METRIC_COLS, *(_metric_name(metric) for metric in metric_cols))
+        )
+    )
+
+
+def _metric_expr(metric: str | MetricExpr) -> MetricExpr | None:
+    """Resolve a metric spec to a MetricExpr if it is computed by this module."""
+    if isinstance(metric, MetricExpr):
+        return metric
+    return DERIVED_TRAINING_METRICS.get(metric)
+
+
+def _ensure_metric_column(
+    raw_df: pd.DataFrame,
+    metric: str | MetricExpr,
+    *,
+    stack: tuple[str, ...] = (),
+) -> None:
+    """Materialize a requested metric column and any derived dependencies."""
+    name = _metric_name(metric)
+    if name in raw_df.columns:
+        return
+
+    expr = _metric_expr(metric)
+    if expr is None:
+        return
+    if name in stack:
+        cycle = " -> ".join((*stack, name))
+        raise ValueError(f"Cyclic derived metric dependency: {cycle}")
+
+    for dependency in expr.deps:
+        _ensure_metric_column(raw_df, dependency, stack=(*stack, name))
+
+    if name not in raw_df.columns and _has_columns(raw_df, expr.deps):
+        raw_df[name] = expr.compute(raw_df)
+
+
 def _safe_denominator(values) -> np.ndarray:
     """Clamp denominators away from zero for derived ratio metrics."""
     return np.maximum(np.asarray(values, dtype=float), _EPS)
 
 
-def _add_derived_saved_report_metrics(raw_df: pd.DataFrame) -> None:
-    """Add derived MSE, ratio, and relative-error columns to saved raw data."""
-    for col, parts in _ADDITIVE_METRIC_COLS.items():
-        if col not in raw_df.columns and _has_columns(raw_df, parts):
-            raw_df[col] = sum(raw_df[part] for part in parts)
-
-    for col, (numerator, denominator) in _RATIO_METRIC_COLS.items():
-        if col not in raw_df.columns and _has_columns(raw_df, (numerator, denominator)):
-            raw_df[col] = (
-                raw_df[numerator].to_numpy(dtype=float)
-                / _safe_denominator(raw_df[denominator])
-            )
-
-    for col, (prediction, actual) in _RELATIVE_ERROR_METRIC_COLS.items():
-        if col not in raw_df.columns and _has_columns(raw_df, (prediction, actual)):
-            raw_df[col] = (
-                np.abs(
-                    raw_df[prediction].to_numpy(dtype=float)
-                    - raw_df[actual].to_numpy(dtype=float)
-                )
-                / _safe_denominator(raw_df[actual])
-            )
+def _add_derived_saved_report_metrics(
+    raw_df: pd.DataFrame,
+    *,
+    metric_cols: Sequence[str | MetricExpr] | None = None,
+) -> None:
+    """Add requested derived metric columns to saved raw data.
+    
+    Parameters
+    ----------
+    raw_df : pd.DataFrame
+        The raw training data DataFrame to which derived metrics will be added.
+    metric_cols : Sequence[str | MetricExpr] | None, optional
+        A sequence of metric names or MetricExpr objects specifying which derived metrics to add.
+        If None, all built-in derived metrics are added. Otherwise, only the requested metrics are
+    """
+    requested = (
+        tuple(DERIVED_TRAINING_METRICS)
+        if metric_cols is None
+        else tuple(metric_cols)
+    )
+    for metric in requested:
+        _ensure_metric_column(raw_df, metric)
 
 
 def summarize_traindata(
@@ -623,6 +889,7 @@ def summarize_traindata(
     quantiles: Sequence[float] | None = None,
     quantile_band: tuple[float, float] | None = (0.25, 0.75),
     x_col: str | None = None,
+    metric_cols: Sequence[str | MetricExpr] | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Build plotting-ready raw, summary, and slope tables from a saved report.
@@ -633,11 +900,12 @@ def summarize_traindata(
     expected by the notebook plotting functions and derives MSE ratios/errors.
     """
     traindata = _as_traindata(report)
-    expanded_df = traindata.expanded_df()
+    expanded_df = traindata.expanded_df(metric_cols=metric_cols)
     resolved_x_col = _xcol_from_metadata(metadata=traindata.metadata, x_col=x_col)
     summary_df = summarize_dataraw(
         expanded_df,
         quantiles=_summary_quantiles(quantiles, quantile_band),
+        metric_cols=metric_cols,
     )
     slopes_df = fit_summary_slopes(
         summary_df,
@@ -684,6 +952,7 @@ def render_training_results(
             quantile_band=quantile_band,
         ),
     )
+    resolved_plots = _plot_specs_with_metric_names(resolved_plots)
     plot_grouped_mean_median_quantile_summary(
         summary_df,
         x_col=x_col,
@@ -734,11 +1003,13 @@ def plot_saved_traindata(
         )
     """
     traindata = _as_traindata(report)
+    resolved_plots = _training_plots_from_keys(plots)
     raw_df, summary_df, slopes_df = summarize_traindata(
         traindata,
         quantiles=quantiles,
         quantile_band=quantile_band,
         x_col=x_col,
+        metric_cols=_metric_specs_from_plot_specs(resolved_plots),
     )
     resolved_x_col = _xcol_from_metadata(metadata=traindata.metadata, x_col=x_col)
 
@@ -767,18 +1038,6 @@ def plot_saved_traindata(
     return raw_df, summary_df, slopes_df
 
 
-# _tilde_u_training_approx_plots_from_keys = _training_plots_from_keys
-# _tilde_u_context_povm_label = _context_povm_label
-# _tilde_u_povm_label_from_descriptor = _povm_label_from_descriptor
-# _tilde_u_context_average_label = _context_average_label
-# _tilde_u_context_quantile_label = _context_quantile_label
-# _tilde_u_training_context_title_suffix = _training_context_title_suffix
-# _tilde_u_training_contextualized_plots = _contextualized_training_plots
-# _tilde_u_slope_group_cols = _slope_group_cols
-# _normalize_tilde_u_report_metadata = _normalize_metadata
-# _as_tilde_u_training_approx_report_data = _as_traindata
-# _tilde_u_report_x_col = _xcol_from_metadata
-# _tilde_u_report_summary_quantiles = _summary_quantiles
 summarize_tilde_u_training_approx = summarize_dataraw
 fit_tilde_u_training_approx_slopes = fit_summary_slopes
 load_tilde_u_training_approx_report_data = load_traindata

@@ -1004,3 +1004,87 @@ def plot_mse_grid_over_N(
     fig.subplots_adjust(**margins)
 
     return fig, axes
+
+
+def plot_leading_mse_difference_grid_over_N(
+    folder,
+    *,
+    d=2,
+    nout=16,
+    n_min=2,
+    n_max=13,
+    ncols=3,
+    xlim=(15, None),
+    ylim=(1e-4, 2e2),
+    rescale_power=1,
+    quantile_band=(0.05, 0.95),
+    show_mean=False,
+    n_realizations=1000,
+    figsize_per_panel=(5.0, 3.5),
+    title=None,
+    filename_template="_d{d}_nout{nout}_N{N}_vsntr.zip",
+    plot_func=None,
+    title_fontsize=20,
+    panel_title_fontsize=14,
+    tick_labelsize=12,
+    axis_labelsize=18,
+    legend_fontsize=14,
+    legend_loc="lower left",
+    title_y=0.995,
+    margins=None,
+):
+    """
+    Plot N- or N^2-scaled leading-MSE differences for files indexed by N = 2**n.
+
+    The plotted quantity is
+    N**rescale_power * (leading_mse_identity - leading_mse_exact), where
+    ``leading_mse_identity`` is the term computed with
+    ``tilde U U_1^T = I`` and ``leading_mse_exact`` keeps the full correction.
+    """
+    plot_keys = {
+        1: "leading_mse_delta_N",
+        2: "leading_mse_delta_N2",
+    }
+    if rescale_power not in plot_keys:
+        raise ValueError("rescale_power must be 1 or 2.")
+
+    if title is None:
+        quantile_label = ""
+        if quantile_band is not None:
+            qlo, qhi = quantile_band
+            quantile_label = f", q{100 * qlo:g}-q{100 * qhi:g}"
+
+        scale_label = "$N$" if rescale_power == 1 else "$N^2$"
+        title = (
+            rf"{scale_label}-rescaled leading-MSE change from "
+            rf"$\tilde U U_1^T=I$, "
+            rf"$d={d}$, $n_{{\mathrm{{out}}}}={nout}$, "
+            rf"${n_realizations}$ realizations{quantile_label}"
+        )
+
+    return plot_mse_grid_over_N(
+        folder,
+        d=d,
+        nout=nout,
+        n_min=n_min,
+        n_max=n_max,
+        ncols=ncols,
+        xlim=xlim,
+        ylim=ylim,
+        plots=plot_keys[rescale_power],
+        quantile_band=quantile_band,
+        show_mean=show_mean,
+        n_realizations=n_realizations,
+        figsize_per_panel=figsize_per_panel,
+        title=title,
+        filename_template=filename_template,
+        plot_func=plot_func,
+        title_fontsize=title_fontsize,
+        panel_title_fontsize=panel_title_fontsize,
+        tick_labelsize=tick_labelsize,
+        axis_labelsize=axis_labelsize,
+        legend_fontsize=legend_fontsize,
+        legend_loc=legend_loc,
+        title_y=title_y,
+        margins=margins,
+    )

@@ -25,6 +25,7 @@ from qelm import (
     leading_training_bias_variance_terms,
     load_traindata,
     make_qelm_training_context,
+    plot_leading_mse_difference_grid_over_N,
     plot_saved_traindata,
     resolve_qelm_target,
     resolve_qelm_test,
@@ -821,8 +822,18 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         raw["leading_mse_exact"],
         loaded.data["leading_bias_sq"] + loaded.data["leading_variance"],
     )
+    np.testing.assert_allclose(
+        raw["leading_mse_identity_minus_exact_times_N"],
+        raw["N"] * (raw["leading_mse_identity"] - raw["leading_mse_exact"]),
+    )
+    np.testing.assert_allclose(
+        raw["leading_mse_identity_minus_exact_times_N2"],
+        raw["N"] ** 2 * (raw["leading_mse_identity"] - raw["leading_mse_exact"]),
+    )
     assert set(summary["ntr"]) == {12, 16}
     assert "leading_mse_exact_q10" in summary.columns
+    assert "leading_mse_identity_minus_exact_times_N_q10" in summary.columns
+    assert "leading_mse_identity_minus_exact_times_N2_q10" in summary.columns
     assert "actual_mse_q90" in summary.columns
     assert set(slopes["x"]) == {"ntr"}
 
@@ -868,16 +879,62 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         "noise=gaussian",
     ):
         assert text in mse_title
+    mse_calls = calls.copy()
+
+    delta_raw, delta_summary, _delta_slopes = plot_saved_traindata(
+        output_file,
+        plots="leading_mse_delta_N2",
+        quantile_band=(0.10, 0.90),
+        make_plots=False,
+    )
+    assert "leading_mse_identity_minus_exact_times_N2" in delta_raw.columns
+    assert "leading_mse_identity_minus_exact_times_N" not in delta_raw.columns
+    assert "leading_mse_identity_minus_exact_times_N2_q10" in delta_summary.columns
+
+    custom_delta = training_reports.MetricExpr(
+        "custom_leading_mse_delta",
+        ("leading_mse_identity", "leading_mse_exact"),
+        lambda df: df["leading_mse_identity"] - df["leading_mse_exact"],
+    )
+    custom_plot = (
+        [(custom_delta, "identity - corrected")],
+        "Custom leading-MSE delta",
+        "delta",
+    )
+    custom_raw, custom_summary, _custom_slopes = plot_saved_traindata(
+        output_file,
+        plots=custom_plot,
+        quantile_band=(0.10, 0.90),
+    )
+    np.testing.assert_allclose(
+        custom_raw["custom_leading_mse_delta"],
+        custom_raw["leading_mse_identity"] - custom_raw["leading_mse_exact"],
+    )
+    assert "custom_leading_mse_delta_q10" in custom_summary.columns
+    assert calls["plots"][0][0] == [
+        ("custom_leading_mse_delta", "identity - corrected")
+    ]
+
     assert "quantiles=" not in mse_title
-    assert calls["quantile_band"] == (0.10, 0.90)
-    assert calls["show_mean"] is False
-    assert calls["show_median"] is False
-    assert calls["xlim"] == (10, 20)
-    assert calls["ylim"] == (0.1, 2.0)
-    assert calls["ax"] is ax_sentinel
-    pd.testing.assert_frame_equal(plotted_raw, raw)
-    pd.testing.assert_frame_equal(plotted_summary, summary)
-    pd.testing.assert_frame_equal(plotted_slopes, slopes)
+    assert mse_calls["quantile_band"] == (0.10, 0.90)
+    assert mse_calls["show_mean"] is False
+    assert mse_calls["show_median"] is False
+    assert mse_calls["xlim"] == (10, 20)
+    assert mse_calls["ylim"] == (0.1, 2.0)
+    assert mse_calls["ax"] is ax_sentinel
+    shared_raw_cols = list(plotted_raw.columns.intersection(raw.columns))
+    shared_summary_cols = list(plotted_summary.columns.intersection(summary.columns))
+    pd.testing.assert_frame_equal(plotted_raw[shared_raw_cols], raw[shared_raw_cols])
+    pd.testing.assert_frame_equal(
+        plotted_summary[shared_summary_cols],
+        summary[shared_summary_cols],
+    )
+    assert "mse_identity_over_exact" not in plotted_raw.columns
+    assert set(plotted_slopes["y"]) <= {
+        "leading_mse_exact_median",
+        "leading_mse_identity_median",
+        "actual_mse_median",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1136,6 +1193,12 @@ def test_tilde_u_plot_selector_uses_short_keys():
         workflows.TRAINING_PLOT_SPECS["mse"],
         workflows.TRAINING_PLOT_SPECS["correction"],
     ]
+    assert workflows._training_plots_from_keys("leading_mse_delta_N") == [
+        workflows.TRAINING_PLOT_SPECS["leading_mse_delta_N"]
+    ]
+    assert workflows._training_plots_from_keys("leading_mse_delta_N2") == [
+        workflows.TRAINING_PLOT_SPECS["leading_mse_delta_N2"]
+    ]
     assert workflows._training_plots_from_keys("all") == (
         workflows.TRAINING_PLOTS
     )
@@ -1163,6 +1226,7 @@ def test_training_report_helpers_are_reexported_for_compatibility():
     assert workflows.run_tilde_u_training_approx_report is workflows.run_training_and_report_results
     assert training_reports.load_tilde_u_training_approx_report_data is training_reports.load_traindata
     assert training_reports.plot_saved_training_data is training_reports.plot_saved_traindata
+    assert callable(plot_leading_mse_difference_grid_over_N)
 
 
 def test_actual_training_requires_noise_N_when_not_swept():

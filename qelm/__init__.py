@@ -38,6 +38,7 @@ from .plotting import (
     plot_Xi21_markov_check,
     plot_deterministic_block_scalings,
     plot_failure_rates,
+    plot_leading_mse_difference_grid_over_N,
     plot_metric_vs_kappa,
     plot_metric_vs_predictors,
     plot_mean_median_quantile_summary,
@@ -97,6 +98,8 @@ from .training import (
 )
 from .trials import one_trial_diagnostics, run_trials, summarize_trials, theoretical_predictors
 from .training_reports import (
+    DERIVED_TRAINING_METRICS,
+    MetricExpr,
     TrainingReport,
     fit_summary_slopes,
     fit_tilde_u_training_approx_slopes,
@@ -150,6 +153,8 @@ __all__ = [
     "QELMTrainingContext",
     "QELMTrainingSpec",
     "QuantumStateBatch",
+    "DERIVED_TRAINING_METRICS",
+    "MetricExpr",
     "ResolvedTarget",
     "ResolvedTest",
     "TildeUDiagnostics",
@@ -203,6 +208,7 @@ __all__ = [
     "plot_Xi21_markov_check",
     "plot_deterministic_block_scalings",
     "plot_failure_rates",
+    "plot_leading_mse_difference_grid_over_N",
     "plot_metric_vs_kappa",
     "plot_metric_vs_predictors",
     "plot_mean_median_quantile_summary",

@@ -70,6 +70,8 @@ from .training import (
     with_training_sweep_value,
 )
 from .training_reports import (
+    DERIVED_TRAINING_METRICS,
+    MetricExpr,
     TRAINING_METRIC_COLS,
     TRAINING_PLOT_SPECS,
     TRAINING_PLOTS,
