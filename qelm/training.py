@@ -29,7 +29,7 @@ from .quantum import (
     QuantumStateBatch,
     _operator_row_inner_products,
     generate_haar_random_kets,
-    generate_qubit_mub_povm,
+    qubit_mub_povm,
     get_rng,
     haar_moments_from_operator_rows,
 )
@@ -940,7 +940,7 @@ def _povm_from_spec(povm, *, nout: int, dim: int, rng: np.random.Generator) -> P
     if kind == QUBIT_MUB_POVM_KIND:
         _validate_qubit_mub_povm_spec_for_config(povm, nout=nout, dim=dim)
         return POVM.from_effects(
-            generate_qubit_mub_povm(),
+            qubit_mub_povm(),
             dim=2,
             nout=6,
             label=QUBIT_MUB_POVM_KIND,

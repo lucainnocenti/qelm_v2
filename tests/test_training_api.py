@@ -20,7 +20,7 @@ from qelm import (
     clear_default_rng,
     compute_qelm_diagnostics,
     compute_qelm_leading_error,
-    generate_qubit_mub_povm,
+    qubit_mub_povm,
     generate_random_rank1_povm,
     leading_training_bias_variance_terms,
     load_traindata,
@@ -310,7 +310,7 @@ def test_qubit_mub_string_povm_spec_builds_valid_context_without_nout():
 
     assert spec.data.nout == 6
     assert context.povm.label == "qubit_mub"
-    np.testing.assert_allclose(context.povm.effects, generate_qubit_mub_povm(), atol=1e-12)
+    np.testing.assert_allclose(context.povm.effects, qubit_mub_povm(), atol=1e-12)
     assert context.P_train.shape == (6, 12)
 
 
@@ -1074,7 +1074,7 @@ def test_tilde_u_mse_plot_title_recovers_old_unlabeled_mub_metadata():
         "data": {
             "povm": {
                 "kind": "explicit",
-                "effects": workflows._array_payload(generate_qubit_mub_povm()),
+                "effects": workflows._array_payload(qubit_mub_povm()),
             },
             "train_state_count": None,
         },

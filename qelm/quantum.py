@@ -393,7 +393,7 @@ def generate_random_rank1_povm(
     return np.einsum("ai,aj->aij", isometry.conj(), isometry)
 
 
-def generate_qubit_mub_povm() -> np.ndarray:
+def qubit_mub_povm() -> np.ndarray:
     """
     Return the six-outcome qubit POVM from the X, Y, and Z mutually unbiased bases.
 

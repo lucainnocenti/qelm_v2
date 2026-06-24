@@ -9,7 +9,7 @@ from qelm import (
     generate_haar_random_isometry,
     generate_haar_random_kets,
     generate_haar_random_pure_dms,
-    generate_qubit_mub_povm,
+    qubit_mub_povm,
     generate_random_rank1_povm,
     haar_probability_moments_from_isometry,
     probability_matrix_from_povm_states,
@@ -113,7 +113,7 @@ def test_four_outcome_qubit_povm_probability_matrix():
 
 
 def test_generate_qubit_mub_povm_is_complete_six_outcome_povm():
-    povm = generate_qubit_mub_povm()
+    povm = qubit_mub_povm()
 
     assert povm.shape == (6, 2, 2)
     np.testing.assert_allclose(povm, povm.conj().transpose(0, 2, 1), atol=1e-12)
@@ -125,7 +125,7 @@ def test_generate_qubit_mub_povm_is_complete_six_outcome_povm():
 
 
 def test_generate_qubit_mub_povm_probability_matrix_for_own_basis_states():
-    povm = generate_qubit_mub_povm()
+    povm = qubit_mub_povm()
     states = np.stack(
         [
             density([1, 0]),

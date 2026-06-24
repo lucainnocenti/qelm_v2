@@ -14,7 +14,7 @@ import pandas as pd
 
 from .linalg import distribution_summary, loglog_fit, quantile_suffix
 from .plotting import plot_grouped_mean_median_quantile_summary
-from .quantum import generate_qubit_mub_povm
+from .quantum import qubit_mub_povm
 
 try:
     from IPython.display import display
@@ -287,7 +287,7 @@ def _povm_label_from_descriptor(povm: dict) -> str:
         except (KeyError, TypeError, ValueError):
             effects = None
         if effects is not None and effects.shape == (6, 2, 2):
-            if np.allclose(effects, generate_qubit_mub_povm(), atol=1e-12):
+            if np.allclose(effects, qubit_mub_povm(), atol=1e-12):
                 return "qubit_mub"
 
     return kind
@@ -767,18 +767,18 @@ def plot_saved_traindata(
     return raw_df, summary_df, slopes_df
 
 
-_tilde_u_training_approx_plots_from_keys = _training_plots_from_keys
-_tilde_u_context_povm_label = _context_povm_label
-_tilde_u_povm_label_from_descriptor = _povm_label_from_descriptor
-_tilde_u_context_average_label = _context_average_label
-_tilde_u_context_quantile_label = _context_quantile_label
-_tilde_u_training_context_title_suffix = _training_context_title_suffix
-_tilde_u_training_contextualized_plots = _contextualized_training_plots
-_tilde_u_slope_group_cols = _slope_group_cols
-_normalize_tilde_u_report_metadata = _normalize_metadata
-_as_tilde_u_training_approx_report_data = _as_traindata
-_tilde_u_report_x_col = _xcol_from_metadata
-_tilde_u_report_summary_quantiles = _summary_quantiles
+# _tilde_u_training_approx_plots_from_keys = _training_plots_from_keys
+# _tilde_u_context_povm_label = _context_povm_label
+# _tilde_u_povm_label_from_descriptor = _povm_label_from_descriptor
+# _tilde_u_context_average_label = _context_average_label
+# _tilde_u_context_quantile_label = _context_quantile_label
+# _tilde_u_training_context_title_suffix = _training_context_title_suffix
+# _tilde_u_training_contextualized_plots = _contextualized_training_plots
+# _tilde_u_slope_group_cols = _slope_group_cols
+# _normalize_tilde_u_report_metadata = _normalize_metadata
+# _as_tilde_u_training_approx_report_data = _as_traindata
+# _tilde_u_report_x_col = _xcol_from_metadata
+# _tilde_u_report_summary_quantiles = _summary_quantiles
 summarize_tilde_u_training_approx = summarize_dataraw
 fit_tilde_u_training_approx_slopes = fit_summary_slopes
 load_tilde_u_training_approx_report_data = load_traindata
