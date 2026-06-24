@@ -49,13 +49,17 @@ def svd_probability_blocks(
     P: np.ndarray,
     rank: int,
     tol: float = 1e-10,
+    include_v2: bool = True,
 ) -> dict:
     """
     Build the SVD block basis used by the Schur-correction scaling diagnostic.
 
-    Returns U1, U2, V1, V2, singular values, diagonal entries of
+    Returns U1, U2, V1, optionally V2, singular values, diagonal entries of
     Pi2 = I - V1 V1^T, and dimension metadata. The returned key names match
     the original notebook diagnostics for stable downstream DataFrame columns.
+    Pass include_v2=False for callers that only need Pi2_diag and not an
+    explicit right-kernel basis; this avoids constructing an ntr x ntr matrix
+    when P is wide.
     """
     P = np.asarray(P, dtype=float)
     nout, ntr = P.shape
@@ -68,12 +72,13 @@ def svd_probability_blocks(
     if ntr <= r:
         raise ValueError(f"Need ntr > r. Got ntr={ntr}, r={r}.")
 
-    U, s, Vt = np.linalg.svd(P, full_matrices=True)
+    use_full_matrices = include_v2 or nout > ntr
+    U, s, Vt = np.linalg.svd(P, full_matrices=use_full_matrices)
 
     U1 = U[:, :r]
     U2 = U[:, r:]
     V1 = Vt.T[:, :r]
-    V2 = Vt.T[:, r:]
+    V2 = Vt.T[:, r:] if include_v2 else None
 
     pi2_diag = 1.0 - np.sum(V1 * V1, axis=1)
     pi2_diag = np.clip(pi2_diag, 0.0, 1.0)

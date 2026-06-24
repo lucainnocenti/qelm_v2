@@ -1621,7 +1621,7 @@ def tilde_u_correction_operator_diagnostics(
     rcond: float = 1e-12,
     ridge: float = 0.0,
 ) -> TildeUDiagnostics:
-    blocks = svd_probability_blocks(P, rank=rank)
+    blocks = svd_probability_blocks(P, rank=rank, include_v2=False)
     U1 = blocks["U1"]
     U2 = blocks["U2"]
     pi2_diag = blocks["Pi2_diag"]

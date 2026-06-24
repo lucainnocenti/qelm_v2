@@ -120,6 +120,37 @@ def test_svd_probability_blocks_decompose_toy_rank_r_probability_matrix():
     _assert_covariance_blocks_match_explicit_sum(P, r=4)
 
 
+def test_svd_probability_blocks_can_skip_explicit_v2_for_wide_matrix():
+    P = make_toy_rank_r_probability_matrix(
+        nout=16,
+        ntr=64,
+        r=4,
+        rng=np.random.default_rng(123),
+    )
+
+    full = svd_probability_blocks(P, rank=4)
+    reduced = svd_probability_blocks(P, rank=4, include_v2=False)
+
+    assert reduced["V2"] is None
+    np.testing.assert_allclose(reduced["singular_values"], full["singular_values"], atol=1e-11)
+    np.testing.assert_allclose(
+        reduced["U1"] @ reduced["U1"].T,
+        full["U1"] @ full["U1"].T,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        reduced["U2"] @ reduced["U2"].T,
+        full["U2"] @ full["U2"].T,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        reduced["V1"] @ reduced["V1"].T,
+        full["V1"] @ full["V1"].T,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(reduced["Pi2_diag"], full["Pi2_diag"], atol=1e-11)
+
+
 def test_svd_probability_blocks_decompose_state_povm_probability_matrix():
     rng = np.random.default_rng(123)
     povm = POVM.random_isometry(nout=32, dim=2, rng=rng)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime
 from multiprocessing import get_context
 from pathlib import Path
+from time import perf_counter
 import os
 import sys
 
 import numpy as np
+import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,14 +19,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from qelm import (  # noqa: E402
+    POVM,
     QELMDataSpec,
     QELMNoiseSpec,
+    QELMRun,
     QELMTargetRequest,
     QELMTestRequest,
     QELMTrainingSpec,
     TrainingStudySpec,
     generate_random_rank1_povm,
-    run_training_and_report_results,
+)
+from qelm.training import (  # noqa: E402
+    _compute_qelm_leading_error_resolved,
+    _run_qelm_training_resolved,
+)
+from qelm.workflows import (  # noqa: E402
+    _save_traindata,
+    _saved_dataraw,
+    _training_metadata,
+    _training_trial_row,
 )
 
 
@@ -48,9 +63,14 @@ def _ntr_values(nout: int) -> tuple[int, ...]:
     return tuple(value for value in NTR_VALUES if value >= int(nout))
 
 
-def _fixed_povms(rng: np.random.Generator) -> dict[tuple[int, int], np.ndarray]:
+def _fixed_povms(rng: np.random.Generator) -> dict[tuple[int, int], POVM]:
     return {
-        (d, nout): generate_random_rank1_povm(nout=nout, dim=d, rng=rng)
+        (d, nout): POVM.from_effects(
+            generate_random_rank1_povm(nout=nout, dim=d, rng=rng),
+            dim=d,
+            nout=nout,
+            label=f"fixed_random_rank1_d{d}_nout{nout}",
+        )
         for d in DIMS
         for nout in _nout_values(d)
     }
@@ -63,20 +83,20 @@ def _work_items() -> list[dict]:
         {
             "d": int(d),
             "nout": int(nout),
-            "N": int(N),
-            "sweep_values": _ntr_values(nout),
-            "povm": {"effects": povms[(d, nout)], "label": f"fixed_random_rank1_d{d}_nout{nout}"},
+            "ntr": int(ntr),
+            "N_values": tuple(int(N) for N in N_VALUES),
+            "povm": povms[(d, nout)],
             "seed": int(rng.integers(0, 2**32 - 1)),
-            "output_file": str(OUTPUT_DIR / f"_d{d}_nout{nout}_N{int(N)}_vsntr.zip"),
+            "output_file": str(OUTPUT_DIR / f"_d{d}_nout{nout}_ntr{int(ntr)}_vsN.zip"),
         }
         for d in DIMS
         for nout in _nout_values(d)
-        for N in N_VALUES
+        for ntr in _ntr_values(nout)
     ]
 
 
 def _item_cost(item: dict) -> int:
-    return int(item["nout"]) * sum(int(value) for value in item["sweep_values"])
+    return int(item["nout"]) * int(item["ntr"]) * len(item["N_values"])
 
 
 def _split_work_items(items: list[dict], parts: int) -> list[list[dict]]:
@@ -87,31 +107,36 @@ def _split_work_items(items: list[dict], parts: int) -> list[list[dict]]:
         chunks[index].append(item)
         loads[index] += _item_cost(item)
     for chunk in chunks:
-        chunk.sort(key=lambda item: (item["d"], item["nout"], item["N"]))
+        chunk.sort(key=lambda item: (item["d"], item["nout"], item["ntr"]))
     return chunks
 
 
-def _study_from_item(item: dict) -> TrainingStudySpec:
-    base = QELMTrainingSpec(
+def _base_spec_from_item(item: dict, *, N: int | None) -> QELMTrainingSpec:
+    return QELMTrainingSpec(
         data=QELMDataSpec(
             d=int(item["d"]),
             nout=int(item["nout"]),
             povm=item["povm"],
-            train_states="haar_pure",
+            train_states={
+                "kind": "haar_pure",
+                "num_states": int(item["ntr"]),
+            },
         ),
         target=QELMTargetRequest(observable="haar_pure_average"),
         test=QELMTestRequest(state="haar_pure_average"),
         noise=QELMNoiseSpec(
             noise="multinomial",
-            N=int(item["N"]),
+            N=None if N is None else int(N),
             actual_noise_trials=1,
         ),
     )
 
+
+def _study_from_item(item: dict) -> TrainingStudySpec:
     return TrainingStudySpec(
-        base=base,
-        sweep_col="ntr",
-        sweep_values=tuple(int(value) for value in item["sweep_values"]),
+        base=_base_spec_from_item(item, N=None),
+        sweep_col="N",
+        sweep_values=tuple(int(value) for value in item["N_values"]),
         repetitions=REPETITIONS,
         seed=int(item["seed"]),
         quantiles=(0.10, 0.25, 0.75, 0.90),
@@ -127,13 +152,179 @@ def _study_from_item(item: dict) -> TrainingStudySpec:
 
 
 def _item_label(item: dict) -> str:
-    sweep_values = tuple(int(value) for value in item["sweep_values"])
-    ntr_label = (
-        str(sweep_values[0])
-        if len(sweep_values) == 1
-        else f"{sweep_values[0]}..{sweep_values[-1]} ({len(sweep_values)})"
+    N_values = tuple(int(value) for value in item["N_values"])
+    N_label = (
+        str(N_values[0])
+        if len(N_values) == 1
+        else f"{N_values[0]}..{N_values[-1]} ({len(N_values)})"
     )
-    return f"d={item['d']} nout={item['nout']} N={item['N']} ntr={ntr_label}"
+    return f"d={item['d']} nout={item['nout']} ntr={item['ntr']} N={N_label}"
+
+
+def _row_for_N(
+    *,
+    item: dict,
+    rng: np.random.Generator,
+    run: QELMRun,
+    N: int,
+    leading_corrected_at_N1: dict,
+    leading_identity_at_N1: dict,
+) -> dict:
+    spec = replace(
+        run.spec,
+        noise=replace(run.spec.noise, N=int(N)),
+    )
+    actual = _run_qelm_training_resolved(
+        spec,
+        rng=rng,
+        context=run.context,
+        target=run.target,
+        test=run.test,
+    )
+
+    return _training_trial_row(
+        d=int(item["d"]),
+        ntr=int(run.context.P_train.shape[1]),
+        N=int(N),
+        noise=spec.noise.noise,
+        blocks=run.diagnostics.blocks,
+        diag=run.diagnostics,
+        test=run.test,
+        target=run.target,
+        exact=_scale_leading_metrics(leading_corrected_at_N1, N),
+        identity=_scale_leading_metrics(leading_identity_at_N1, N),
+        actual=actual.to_metrics_dict(),
+    )
+
+
+def _scale_leading_metrics(metrics_at_N1: dict, N: int) -> dict:
+    N = int(N)
+    if N <= 0:
+        raise ValueError("N must be positive.")
+
+    bias_sq = float(metrics_at_N1["bias_sq"]) / (N**2)
+    variance = float(metrics_at_N1["variance"]) / N
+    return {
+        "bias_sq": bias_sq,
+        "variance": variance,
+        "mse": bias_sq + variance,
+        "bias_abs_mean": _scale_optional_metric(metrics_at_N1.get("bias_abs_mean", np.nan), N),
+        "bias_sq_max": _scale_optional_metric(metrics_at_N1.get("bias_sq_max", np.nan), N**2),
+        "variance_max": _scale_optional_metric(metrics_at_N1.get("variance_max", np.nan), N),
+    }
+
+
+def _scale_optional_metric(value: float, denominator: int) -> float:
+    value = float(value)
+    if not np.isfinite(value):
+        return value
+    return value / denominator
+
+
+def _failed_row(item: dict, *, N: int, trial: int, trial_seed: int, error: Exception) -> dict:
+    return {
+        "d": int(item["d"]),
+        "nout": int(item["nout"]),
+        "ntr": int(item["ntr"]),
+        "N": int(N),
+        "noise": "multinomial",
+        "trial": int(trial),
+        "trial_seed": int(trial_seed),
+        "failed": True,
+        "error": repr(error),
+    }
+
+
+def _run_item_rows(item: dict, *, progress_kwargs: dict | None = None) -> pd.DataFrame:
+    master_rng = np.random.default_rng(int(item["seed"]))
+    rows = []
+    N_values = tuple(int(value) for value in item["N_values"])
+
+    from tqdm import tqdm
+
+    pbar = tqdm(
+        total=REPETITIONS * len(N_values),
+        unit="trial",
+        **(progress_kwargs or {}),
+    )
+    try:
+        for trial in range(REPETITIONS):
+            trial_seed = int(master_rng.integers(0, 2**32 - 1))
+            rng = np.random.default_rng(trial_seed)
+
+            try:
+                run = QELMRun(_base_spec_from_item(item, N=N_values[0]), rng=rng)
+                # Resolve the N-independent objects once, then reuse them across N.
+                _ = run.context
+                _ = run.test
+                _ = run.target
+                _ = run.diagnostics
+                spec_at_N1 = replace(
+                    run.spec,
+                    noise=replace(run.spec.noise, N=1),
+                )
+                leading_corrected_at_N1 = _compute_qelm_leading_error_resolved(
+                    spec_at_N1,
+                    run.context,
+                    target=run.target,
+                    test=run.test,
+                    diagnostics=run.diagnostics,
+                    corrected=True,
+                ).to_metrics_dict()
+                leading_identity_at_N1 = _compute_qelm_leading_error_resolved(
+                    spec_at_N1,
+                    run.context,
+                    target=run.target,
+                    test=run.test,
+                    diagnostics=run.diagnostics,
+                    corrected=False,
+                ).to_metrics_dict()
+            except Exception as exc:
+                if not FAIL_SOFT:
+                    raise
+                for N in N_values:
+                    rows.append(
+                        _failed_row(
+                            item,
+                            N=N,
+                            trial=trial,
+                            trial_seed=trial_seed,
+                            error=exc,
+                        )
+                    )
+                    pbar.update(1)
+                continue
+
+            for N in N_values:
+                try:
+                    row = _row_for_N(
+                        item=item,
+                        rng=rng,
+                        run=run,
+                        N=N,
+                        leading_corrected_at_N1=leading_corrected_at_N1,
+                        leading_identity_at_N1=leading_identity_at_N1,
+                    )
+                    row["failed"] = False
+                    row["error"] = ""
+                except Exception as exc:
+                    if not FAIL_SOFT:
+                        raise
+                    row = _failed_row(
+                        item,
+                        N=N,
+                        trial=trial,
+                        trial_seed=trial_seed,
+                        error=exc,
+                    )
+                row["trial"] = trial
+                row["trial_seed"] = trial_seed
+                rows.append(row)
+                pbar.update(1)
+    finally:
+        pbar.close()
+
+    return pd.DataFrame(rows)
 
 
 def _run_item(item: dict, worker_index: int | None = None) -> dict:
@@ -141,8 +332,10 @@ def _run_item(item: dict, worker_index: int | None = None) -> dict:
     if worker_index is not None:
         desc = f"worker {worker_index}: {desc}"
 
-    run_training_and_report_results(
-        _study_from_item(item),
+    started_at = datetime.now().astimezone()
+    start_time = perf_counter()
+    raw_df = _run_item_rows(
+        item,
         progress_kwargs={
             "desc": desc,
             "position": None if worker_index is None else worker_index - 1,
@@ -150,13 +343,26 @@ def _run_item(item: dict, worker_index: int | None = None) -> dict:
             "dynamic_ncols": False,
             "ncols": 160,
         },
-        quiet=True,
+    )
+    elapsed_seconds = perf_counter() - start_time
+    completed_at = datetime.now().astimezone()
+    metadata = _training_metadata(
+        _study_from_item(item),
+        started_at=started_at,
+        completed_at=completed_at,
+        elapsed_seconds=elapsed_seconds,
+    )
+    saved_path = _save_traindata(
+        item["output_file"],
+        dataraw=_saved_dataraw(raw_df, sweep_col="N"),
+        metadata=metadata,
+        overwrite=OVERWRITE,
     )
     return {
         "d": int(item["d"]),
         "nout": int(item["nout"]),
-        "N": int(item["N"]),
-        "output_file": str(item["output_file"]),
+        "ntr": int(item["ntr"]),
+        "output_file": str(saved_path),
     }
 
 
@@ -184,8 +390,9 @@ def main() -> None:
     ]
 
     print(
-        f"Running {len(items)} ntr sweep file(s) with {REPETITIONS} repetitions "
-        f"per ntr value across {worker_count} worker process(es).",
+        f"Running {len(items)} ntr checkpoint file(s) with {REPETITIONS} repetitions "
+        f"and {len(N_VALUES)} N value(s) per repetition across "
+        f"{worker_count} worker process(es).",
         flush=True,
     )
 

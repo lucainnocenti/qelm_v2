@@ -1,3 +1,10 @@
+"""Quantum objects used to build the probability matrices studied by QELM.
+
+This module keeps the low-level quantum mechanics local: it constructs POVMs,
+state batches, Born-rule probability matrices, and the dual-frame quantities
+used by the training and rank-diagnostic routines.
+"""
+
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -48,10 +55,12 @@ def get_rng(rng: np.random.Generator | int | None = None) -> np.random.Generator
 
 
 def _rng_or_default(rng: np.random.Generator | int | None) -> np.random.Generator:
+    """Backward-compatible alias for resolving optional RNG arguments."""
     return get_rng(rng)
 
 
 def _as_operator_stack(operators: Sequence[np.ndarray] | np.ndarray, name: str) -> np.ndarray:
+    """Coerce an operator sequence to a finite complex stack with shape (n, d, d)."""
     stack = np.asarray(operators, dtype=complex)
 
     if stack.ndim != 3:
@@ -67,6 +76,7 @@ def _as_operator_stack(operators: Sequence[np.ndarray] | np.ndarray, name: str) 
 
 
 def _check_hermitian_psd(stack: np.ndarray, name: str, atol: float) -> None:
+    """Validate that every operator in a stack is Hermitian positive semidefinite."""
     for index, operator in enumerate(stack):
         if not np.allclose(operator, operator.conj().T, atol=atol):
             raise ValueError(f"{name}[{index}] is not Hermitian within tolerance.")
@@ -78,6 +88,7 @@ def _check_hermitian_psd(stack: np.ndarray, name: str, atol: float) -> None:
 
 
 def _state_like_to_density(state, *, dim: int, name: str = "state") -> np.ndarray:
+    """Normalize a ket or accept a density matrix as the common density form."""
     state = np.asarray(state, dtype=complex)
     if state.ndim == 1:
         return _pure_state_vector_to_density(state, dim, name=name)
@@ -97,6 +108,7 @@ def _operator_row_inner_products(
     *,
     clip: bool = True,
 ) -> np.ndarray:
+    """Pair vectorized operators with vectorized states to form probability-like values."""
     probabilities = np.asarray(operator_rows, dtype=complex).conj() @ np.asarray(state_rows, dtype=complex).T
     probabilities = probabilities.real
     if clip:
@@ -110,6 +122,8 @@ def _operator_stack_probability_matrix(
     *,
     clip: bool = False,
 ) -> np.ndarray:
+    """Evaluate Born-rule probabilities P[a, i] = Tr(mu_a rho_i) for stacks."""
+    # The second operand uses reversed state indices so einsum performs the trace.
     probabilities = np.einsum("ajk,ikj->ai", effects, states)
     probabilities = probabilities.real
     if clip:
@@ -277,6 +291,7 @@ def dual_rows_for_operator_frame(
     operator_rows: np.ndarray,
     rcond: float | None,
 ) -> np.ndarray:
+    """Compute canonical dual-frame rows for vectorized operators."""
     rows = np.asarray(operator_rows, dtype=complex)
     frame = rows.T @ rows.conj()
     frame_pinv = np.linalg.pinv(frame) if rcond is None else np.linalg.pinv(frame, rcond=rcond)
@@ -284,6 +299,7 @@ def dual_rows_for_operator_frame(
 
 
 def _pure_state_vector_to_density(vector: np.ndarray, dim: int, name: str = "state") -> np.ndarray:
+    """Normalize one state vector and return its rank-one density projector."""
     vector = np.asarray(vector, dtype=complex)
     if vector.ndim != 1 or vector.shape[0] != dim:
         raise ValueError(f"{name} vector must have shape ({dim},).")
@@ -307,6 +323,7 @@ def ket2dm(vector: np.ndarray) -> np.ndarray:
 
 
 def generate_haar_random_state_vectors(**kwargs):
+    """Deprecated state-vector generator kept only to point callers to the new API."""
     raise DeprecationWarning("generate_haar_random_state_vectors is deprecated; use generate_haar_random_kets and transpose instead.")
 
 
@@ -387,9 +404,8 @@ def generate_random_rank1_povm(
     Returns a complex array with shape (nout, dim, dim) containing the POVM effects.
     """
     isometry = generate_haar_random_isometry(nout=nout, dim=dim, rng=rng)
-    # I guess using conj on the first argument here is slightly different than the
-    # usual convention we use to define these POVMs, but the distribution of effects
-    # is the same, so it doesn't really matter.
+    # Rows of V are bras in this convention, hence conjugating the first factor
+    # gives the effect matrix whose entries are mu_ij = conj(v_i) v_j.
     return np.einsum("ai,aj->aij", isometry.conj(), isometry)
 
 
@@ -417,6 +433,8 @@ def qubit_mub_povm() -> np.ndarray:
 
 @dataclass(frozen=True)
 class QuantumStateBatch:
+    """Validated density-matrix batch used as the state side of QELM datasets."""
+
     states: np.ndarray
     _state_rows_cache: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
     _frame_pinv_cache: dict[float | None, np.ndarray] = field(
@@ -427,6 +445,7 @@ class QuantumStateBatch:
     )
 
     def __post_init__(self) -> None:
+        """Coerce and validate the batch while preserving frozen dataclass semantics."""
         states = _as_operator_stack(self.states, "states")
         if not np.allclose(states, states.conj().transpose(0, 2, 1), atol=1e-10):
             raise ValueError("States must be Hermitian.")
@@ -438,6 +457,7 @@ class QuantumStateBatch:
 
     @classmethod
     def from_state_like(cls, state, *, dim: int, name: str = "state") -> "QuantumStateBatch":
+        """Create a one-state or many-state batch from vectors/density matrices."""
         state = np.asarray(state, dtype=complex)
         if state.ndim in {1, 2}:
             return cls(_state_like_to_density(state, dim=dim, name=name)[None, :, :])
@@ -458,6 +478,7 @@ class QuantumStateBatch:
         axis: str = "auto",
         name: str = "state_vectors",
     ) -> "QuantumStateBatch":
+        """Convert one or more pure state vectors into a density-matrix batch."""
         vectors = np.asarray(state_vectors, dtype=complex)
         axis = axis.lower()
         if axis not in {"auto", "rows", "columns"}:
@@ -505,6 +526,7 @@ class QuantumStateBatch:
         dim: int,
         rng: np.random.Generator | None = None,
     ) -> "QuantumStateBatch":
+        """Sample Haar pure states for randomized training or test batches."""
         return cls(generate_haar_random_pure_dms(num_states=num_states, dim=dim, rng=rng))
 
     @classmethod
@@ -514,6 +536,7 @@ class QuantumStateBatch:
         dim: int,
         rng: np.random.Generator | None = None,
     ) -> "QuantumStateBatch":
+        """Sample Haar pure states through column-oriented kets."""
         vectors = generate_haar_random_kets(
             num_states=num_states,
             dim=dim,
@@ -524,14 +547,17 @@ class QuantumStateBatch:
 
     @property
     def num_states(self) -> int:
+        """Number of density matrices in this batch."""
         return self.states.shape[0]
 
     @property
     def dim(self) -> int:
+        """Hilbert-space dimension of each density matrix."""
         return self.states.shape[1]
 
     @property
     def _state_rows(self) -> np.ndarray:
+        """Cached vectorized state rows used by frame and dual-frame routines."""
         if self._state_rows_cache is None:
             object.__setattr__(self, "_state_rows_cache", self.states.reshape(self.num_states, -1))
         return self._state_rows_cache
@@ -550,6 +576,8 @@ class QuantumStateBatch:
 
 @dataclass(frozen=True)
 class POVM:
+    """Validated POVM with cached Born-rule, Haar-moment, and dual-frame helpers."""
+
     effects: np.ndarray
     label: str | None = None
     isometry: np.ndarray | None = None
@@ -569,6 +597,7 @@ class POVM:
     )
 
     def __post_init__(self) -> None:
+        """Validate explicit POVM effects and optional generating isometry."""
         effects = np.asarray(self.effects, dtype=complex)
 
         if effects.ndim != 3:
@@ -615,6 +644,7 @@ class POVM:
         label: str | None = None,
         atol: float = 1e-10,
     ) -> "POVM":
+        """Wrap explicit effects after validating optional configured shape metadata."""
         povm = cls(np.asarray(effects, dtype=complex), label=label, atol=atol)
         if nout is not None and povm.nout != int(nout):
             raise ValueError(
@@ -633,6 +663,7 @@ class POVM:
         dim: int,
         rng: np.random.Generator | None = None,
     ) -> "POVM":
+        """Build the standard random rank-one POVM used in sweep experiments."""
         effects = generate_random_rank1_povm(nout=nout, dim=dim, rng=rng)
         return cls(effects, label="random_rank1")
 
@@ -643,6 +674,7 @@ class POVM:
         dim: int,
         rng: np.random.Generator | None = None
     ) -> "POVM":
+        """Build a random rank-one POVM while retaining its sampled isometry."""
         generator = generate_haar_random_isometry
         isometry = generator(nout=nout, dim=dim, rng=rng)
         effects = np.einsum("ai,aj->aij", isometry.conj(), isometry)
@@ -650,14 +682,17 @@ class POVM:
 
     @property
     def nout(self) -> int:
+        """Number of POVM outcomes, equal to the probability-matrix row count."""
         return self.effects.shape[0]
 
     @property
     def dim(self) -> int:
+        """Hilbert-space dimension measured by this POVM."""
         return self.effects.shape[1]
 
     @property
     def _effect_rows(self) -> np.ndarray:
+        """Cached vectorized effects used as the POVM operator frame."""
         if self._effect_rows_cache is None:
             object.__setattr__(self, "_effect_rows_cache", self.effects.reshape(self.nout, -1))
         return self._effect_rows_cache
@@ -667,7 +702,10 @@ class POVM:
         states: QuantumStateBatch
     ) -> np.ndarray:
         """
-        Compute the probability matrix for the given states.
+        Compute P[a, i] = Tr(mu_a rho_i) for this POVM and a state batch.
+
+        This is the central data matrix consumed by the rank diagnostics and
+        training-error routines.
         """
         if states.dim != self.dim:
             raise ValueError("POVM effects and states must have the same dimension.")
@@ -677,6 +715,7 @@ class POVM:
         self,
         state: np.ndarray
     ) -> np.ndarray:
+        """Compute outcome probabilities for a single ket or density matrix."""
         p = probability_vector_from_povm_state(
             self.effects,
             state,
@@ -687,6 +726,7 @@ class POVM:
         return p
 
     def haar_probability_moments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return cached Haar pure-state moments for this POVM's probabilities."""
         if self._haar_probability_moments_cache is None:
             moments = haar_moments_from_operators(self.effects)
             object.__setattr__(self, "_haar_probability_moments_cache", moments)
@@ -702,17 +742,21 @@ class POVM:
         return self._dual_effect_rows_cache[rcond]
 
     def effect_frame_dual_rows(self, rcond: float | None) -> np.ndarray:
+        """Alias for the POVM canonical dual rows used by older callers."""
         return self.dual_effect_rows(rcond=rcond)
 
 
 @dataclass(frozen=True)
 class QELMQuantumDataset:
+    """Bundle a POVM with train/test states and the dual frames derived from them."""
+
     povm: POVM
     train_states: QuantumStateBatch
     test_states: QuantumStateBatch | None = None
     rcond: float | None = None
 
     def __post_init__(self) -> None:
+        """Validate that all dataset components share the same Hilbert space."""
         if not isinstance(self.povm, POVM):
             raise TypeError("povm must be a POVM object.")
         if not isinstance(self.train_states, QuantumStateBatch):
@@ -756,6 +800,7 @@ class QELMQuantumDataset:
         rcond: float = 1e-12,
         ntest: int | None = None,
     ) -> "QELMQuantumDataset":
+        """Sample the random POVM plus Haar states used by synthetic QELM studies."""
         rng = get_rng(rng)
         povm = POVM.random_isometry(nout=nout, dim=dim, rng=rng)
         train_states = QuantumStateBatch.haar_pure_from_columns(
@@ -781,20 +826,23 @@ class QELMQuantumDataset:
 
     @property
     def _effect_rows(self) -> np.ndarray:
+        """Vectorized POVM effects exposed for block/rank calculations."""
         return self.povm._effect_rows
 
     @property
     def _train_state_rows(self) -> np.ndarray:
+        """Vectorized training states exposed for dual-frame contractions."""
         return self.train_states._state_rows
 
     @property
     def dual_effect_rows(self) -> np.ndarray:
+        """Backward-compatible name for training-frame dual effect rows."""
         return self.training_dual_effect_rows
 
     @property
     def training_dual_effect_rows(self) -> np.ndarray:
         """Compute POVM-dual rows represented through the training-state dual frame.
-        
+
         The leading-bias term uses <tilde mu_a, tilde sigma>, where tilde
         mu_a is the canonical dual of the POVM frame and tilde sigma is the
         state represented through the training-state dual frame. Equivalently,
@@ -810,17 +858,17 @@ class QELMQuantumDataset:
 
     @property
     def P_train(self) -> np.ndarray:
+        """Born-rule probability matrix for the training states."""
         return self.povm.probability_matrix(self.train_states)
 
     @property
     def dual_P_train(self) -> np.ndarray:
-        """Compute the probability matrix but using the training dual effect rows instead of the actual POVM effects.
-        
+        """Compute training probabilities using dual rows instead of POVM effects.
+
         The end result is the matrix <tilde mu_a, tilde rho_i>, where
         tilde mu_a are the POVM-frame dual effects and tilde rho_i are the
         training-state-frame dual states.
         """
-        # this computes the probability matrix but using the training dual effect rows instead of the actual POVM effects
         return _operator_row_inner_products(
             self.training_dual_effect_rows,
             self._train_state_rows,
@@ -829,12 +877,14 @@ class QELMQuantumDataset:
 
     @property
     def P_test(self) -> np.ndarray | None:
+        """Born-rule probability matrix for test states, if a test batch exists."""
         if self.test_states is None:
             return None
         return self.povm.probability_matrix(self.test_states)
 
     @property
     def dual_P_test(self) -> np.ndarray | None:
+        """Dual-frame probability-like matrix for test states, if present."""
         if self.test_states is None:
             return None
         return _operator_row_inner_products(
@@ -844,13 +894,16 @@ class QELMQuantumDataset:
         )
 
     def haar_test_moments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Haar test-target moments for the physical POVM probabilities."""
         return self.povm.haar_probability_moments()
 
     def dual_haar_test_moments(self) -> tuple[np.ndarray, np.ndarray]:
+        """Haar test-target moments after replacing effects by training dual rows."""
         return haar_moments_from_operator_rows(
             self.training_dual_effect_rows,
             dim=self.povm.dim,
         )
+
 
 def haar_probability_moments_from_isometry(
     isometry: np.ndarray,
