@@ -36,7 +36,7 @@ class MetricExpr:
 # Ordered public metric schema used by summarize_dataraw(), fit_summary_slopes(),
 # and the saved-report plotting helpers. Each string is a DataFrame column name:
 # raw columns may come directly from a simulation report, while derived columns
-# such as leading_mse_exact or mse_identity_over_exact are reconstructed from the
+# such as leading_mse or mse_identity_over_exact are reconstructed from the
 # MetricExpr registry below when TrainingReport.expanded_df() loads compact saved
 # data. The order controls display/table ordering; it is not a dependency order.
 TRAINING_METRIC_COLS = [
@@ -44,16 +44,20 @@ TRAINING_METRIC_COLS = [
     "correction_op",
     "C22_lambda_min",
     "C22_cond",
-    "leading_bias_sq_exact",
-    "leading_bias_sq_identity",
-    "leading_var_exact",
+    "leading_bias2",
+    "leading_bias2_identity",
+    "bias2_delta",
+    "leading_var",
     "leading_var_identity",
-    "leading_mse_exact",
+    "variance_delta",
+    "bias2_delta_times_N2",
+    "variance_delta_times_N_ntr",
+    "leading_mse",
     "leading_mse_identity",
-    "actual_mse",
+    "mse",
     "actual_bias_sq",
     "actual_variance",
-    "bias_sq_identity_over_exact",
+    "bias2_identity_over_exact",
     "var_identity_over_exact",
     "mse_identity_over_exact",
     "actual_over_leading_exact",
@@ -82,33 +86,63 @@ TRAINING_PLOT_SPECS = {
     ),
     "bias": (
         [
-            ("leading_bias_sq_exact", "with correction"),
-            ("leading_bias_sq_identity", r"$\tilde U U_1^T = I$"),
+            ("leading_bias2", "with correction"),
+            ("leading_bias2_identity", r"$\tilde U U_1^T = I$"),
         ],
         "Leading training squared bias",
-        "mean test squared bias, leading formula",
+        r"$\text{bias}^2_{\text{train}}$",
+    ),
+    "bias2_delta": (
+        [
+            ("bias2_delta", "with correction - identity"),
+        ],
+        "Full minus approx leading training squared bias",
+        r"$\Delta\text{bias}^2_{\text{train}}$",
     ),
     "variance": (
         [
-            ("leading_var_exact", "with correction"),
+            ("leading_var", "with correction"),
             ("leading_var_identity", r"$\tilde U U_1^T = I$"),
         ],
         "Leading training variance",
-        "mean test variance, leading formula",
+        r"$\text{variance}_{\text{train}}$",
+    ),
+    "variance_delta": (
+        [
+            ("variance_delta", "with correction - identity"),
+        ],
+        "Full minus approx leading training variance",
+        r"$\Delta\text{variance}_{\text{train}}$",
+    ),
+    "leading_deltas": (
+        [
+            ("bias2_delta", r"$\Delta\mathrm{bias}^2$"),
+            ("variance_delta", r"$\Delta\mathrm{variance}$"),
+        ],
+        "Full minus approx leading training terms",
+        r"$\Delta\text{leading term}_{\text{train}}$",
+    ),
+    "leading_deltas_rescaled": (
+        [
+            ("bias2_delta_times_N2", r"$N^2\Delta\mathrm{bias}^2$"),
+            ("variance_delta_times_N_ntr", r"$Nn_{\mathrm{tr}}\Delta\mathrm{variance}$"),
+        ],
+        "Rescaled |full - approx| leading terms",
+        r"rescaled $|\Delta\text{leading term}_{\text{train}}|$",
     ),
     "leading_mse": (
         [
-            ("leading_mse_exact", "with correction"),
+            ("leading_mse", "with correction"),
             ("leading_mse_identity", r"$\tilde U U_1^T = I$"),
         ],
         "Leading bias-plus-variance prediction",
-        "leading squared bias + leading variance",
+        r"$\text{MSE}_{\text{leading}}$",
     ),
     "mse": (
         [
-            ("leading_mse_exact", r"leading, full $\tilde U U_1^T$"),
+            ("leading_mse", r"leading, full $\tilde U U_1^T$"),
             ("leading_mse_identity", r"leading, $\tilde U U_1^T = I$"),
-            ("actual_mse", r"$\mathrm{MSE}(N,\infty)$"),
+            ("mse", r"$\mathrm{MSE}(N,\infty)$"),
         ],
         "MSE vs leading terms",
         r"$\mathrm{MSE}(N,\infty)$",
@@ -172,11 +206,11 @@ TRAINING_PLOTS = list(TRAINING_PLOT_SPECS.values())
 # reverse map (_COMPACT_TO_INTERNAL_METRIC_COLS) so downstream code only sees the
 # canonical names, regardless of how the report was stored on disk.
 TRAINING_SAVED_METRIC_COLS = {
-    "leading_bias_sq_exact": "leading_bias_sq",
-    "leading_var_exact": "leading_variance",
-    "leading_bias_sq_identity": "identity_leading_bias_sq",
+    "leading_bias2": "leading_bias2",
+    "leading_var": "leading_variance",
+    "leading_bias2_identity": "identity_leading_bias2",
     "leading_var_identity": "identity_leading_variance",
-    "actual_mse": "mse",
+    "mse": "mse",
     "actual_bias_sq": "bias_sq",
     "actual_variance": "variance",
 }
@@ -196,6 +230,9 @@ _SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
 _COMPACT_TO_INTERNAL_METRIC_COLS = {
     compact: internal for internal, compact in _SAVED_METRIC_COLS.items()
 }
+_METRIC_ALIASES = {
+    "leading_var_exact": "leading_var",
+}
 
 # Small positive floor used by _safe_denominator(). Ratios and relative errors can
 # be plotted on log scales, so denominators at or below machine-zero are clamped
@@ -209,97 +246,130 @@ _EPS = 1e-15
 # New named derived metrics can be added here, while one-off plots can pass a
 # MetricExpr directly in their series_specs without changing any module constant.
 DERIVED_TRAINING_METRICS = {
-    "leading_mse_exact": MetricExpr(
-        "leading_mse_exact",
-        ("leading_bias_sq_exact", "leading_var_exact"),
-        lambda df: df["leading_bias_sq_exact"] + df["leading_var_exact"],
+    "leading_mse": MetricExpr(
+        "leading_mse",
+        ("leading_bias2", "leading_var"),
+        lambda df: df["leading_bias2"] + df["leading_var"],
     ),
     "leading_mse_identity": MetricExpr(
         "leading_mse_identity",
-        ("leading_bias_sq_identity", "leading_var_identity"),
-        lambda df: df["leading_bias_sq_identity"] + df["leading_var_identity"],
+        ("leading_bias2_identity", "leading_var_identity"),
+        lambda df: df["leading_bias2_identity"] + df["leading_var_identity"],
     ),
-    "bias_sq_identity_over_exact": MetricExpr(
-        "bias_sq_identity_over_exact",
-        ("leading_bias_sq_identity", "leading_bias_sq_exact"),
+    "bias2_identity_over_exact": MetricExpr(
+        "bias2_identity_over_exact",
+        ("leading_bias2_identity", "leading_bias2"),
         lambda df: (
-            df["leading_bias_sq_identity"].to_numpy(dtype=float)
-            / _safe_denominator(df["leading_bias_sq_exact"])
+            df["leading_bias2_identity"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_bias2"])
+        ),
+    ),
+    "bias2_delta": MetricExpr(
+        "bias2_delta",
+        ("leading_bias2", "leading_bias2_identity"),
+        lambda df: (
+            np.abs(df["leading_bias2"].to_numpy(dtype=float)
+            - df["leading_bias2_identity"].to_numpy(dtype=float))
+        ),
+    ),
+    "variance_delta": MetricExpr(
+        "variance_delta",
+        ("leading_var", "leading_var_identity"),
+        lambda df: (
+            np.abs(df["leading_var"].to_numpy(dtype=float)
+            - df["leading_var_identity"].to_numpy(dtype=float))
+        ),
+    ),
+    "bias2_delta_times_N2": MetricExpr(
+        "bias2_delta_times_N2",
+        ("bias2_delta", "N"),
+        lambda df: (
+            df["N"].to_numpy(dtype=float) ** 2
+            * df["bias2_delta"].to_numpy(dtype=float)
+        ),
+    ),
+    "variance_delta_times_N_ntr": MetricExpr(
+        "variance_delta_times_N_ntr",
+        ("variance_delta", "N", "ntr"),
+        lambda df: (
+            df["N"].to_numpy(dtype=float)
+            * df["ntr"].to_numpy(dtype=float)
+            * df["variance_delta"].to_numpy(dtype=float)
         ),
     ),
     "var_identity_over_exact": MetricExpr(
         "var_identity_over_exact",
-        ("leading_var_identity", "leading_var_exact"),
+        ("leading_var_identity", "leading_var"),
         lambda df: (
             df["leading_var_identity"].to_numpy(dtype=float)
-            / _safe_denominator(df["leading_var_exact"])
+            / _safe_denominator(df["leading_var"])
         ),
     ),
     "mse_identity_over_exact": MetricExpr(
         "mse_identity_over_exact",
-        ("leading_mse_identity", "leading_mse_exact"),
+        ("leading_mse_identity", "leading_mse"),
         lambda df: (
             df["leading_mse_identity"].to_numpy(dtype=float)
-            / _safe_denominator(df["leading_mse_exact"])
+            / _safe_denominator(df["leading_mse"])
         ),
     ),
     "actual_over_leading_exact": MetricExpr(
         "actual_over_leading_exact",
-        ("actual_mse", "leading_mse_exact"),
+        ("mse", "leading_mse"),
         lambda df: (
-            df["actual_mse"].to_numpy(dtype=float)
-            / _safe_denominator(df["leading_mse_exact"])
+            df["mse"].to_numpy(dtype=float)
+            / _safe_denominator(df["leading_mse"])
         ),
     ),
     "actual_over_leading_identity": MetricExpr(
         "actual_over_leading_identity",
-        ("actual_mse", "leading_mse_identity"),
+        ("mse", "leading_mse_identity"),
         lambda df: (
-            df["actual_mse"].to_numpy(dtype=float)
+            df["mse"].to_numpy(dtype=float)
             / _safe_denominator(df["leading_mse_identity"])
         ),
     ),
     "leading_exact_relative_error": MetricExpr(
         "leading_exact_relative_error",
-        ("leading_mse_exact", "actual_mse"),
+        ("leading_mse", "mse"),
         lambda df: (
             np.abs(
-                df["leading_mse_exact"].to_numpy(dtype=float)
-                - df["actual_mse"].to_numpy(dtype=float)
+                df["leading_mse"].to_numpy(dtype=float)
+                - df["mse"].to_numpy(dtype=float)
             )
-            / _safe_denominator(df["actual_mse"])
+            / _safe_denominator(df["mse"])
         ),
     ),
     "leading_identity_relative_error": MetricExpr(
         "leading_identity_relative_error",
-        ("leading_mse_identity", "actual_mse"),
+        ("leading_mse_identity", "mse"),
         lambda df: (
             np.abs(
                 df["leading_mse_identity"].to_numpy(dtype=float)
-                - df["actual_mse"].to_numpy(dtype=float)
+                - df["mse"].to_numpy(dtype=float)
             )
-            / _safe_denominator(df["actual_mse"])
+            / _safe_denominator(df["mse"])
         ),
     ),
     "leading_mse_identity_minus_exact_times_N": MetricExpr(
         "leading_mse_identity_minus_exact_times_N",
-        ("leading_mse_identity", "leading_mse_exact", "N"),
+        ("leading_mse_identity", "leading_mse", "N"),
         lambda df: (
             df["N"].to_numpy(dtype=float)
             * (
                 df["leading_mse_identity"].to_numpy(dtype=float)
-                - df["leading_mse_exact"].to_numpy(dtype=float)
+                - df["leading_mse"].to_numpy(dtype=float)
             )
         ),
     ),
     "leading_mse_identity_minus_exact_times_N2": MetricExpr(
         "leading_mse_identity_minus_exact_times_N2",
-        ("leading_mse_identity", "leading_mse_exact", "N"),
+        ("leading_mse_identity", "leading_mse", "N"),
         lambda df: (
             df["N"].to_numpy(dtype=float) ** 2
             * (
                 df["leading_mse_identity"].to_numpy(dtype=float)
-                - df["leading_mse_exact"].to_numpy(dtype=float)
+                - df["leading_mse"].to_numpy(dtype=float)
             )
         ),
     ),
@@ -335,6 +405,9 @@ class TrainingReport:
         for compact_col, internal_col in _COMPACT_TO_INTERNAL_METRIC_COLS.items():
             if compact_col in raw_df.columns and internal_col not in raw_df.columns:
                 raw_df[internal_col] = raw_df[compact_col]
+        for old_col, new_col in _METRIC_ALIASES.items():
+            if old_col in raw_df.columns and new_col not in raw_df.columns:
+                raw_df[new_col] = raw_df[old_col]
 
         data = self.metadata.get("data", {})
         noise = self.metadata.get("noise", {})
@@ -435,7 +508,8 @@ def _is_training_plot_spec(value: object) -> bool:
 
 def _metric_name(metric: str | MetricExpr) -> str:
     """Return the concrete DataFrame column name for a metric spec."""
-    return metric.name if isinstance(metric, MetricExpr) else metric
+    name = metric.name if isinstance(metric, MetricExpr) else metric
+    return _METRIC_ALIASES.get(name, name)
 
 
 def _metric_specs_from_plot_specs(plots: Sequence[tuple]) -> tuple[str | MetricExpr, ...]:
@@ -596,6 +670,17 @@ def _contextualized_training_plots(
     return contextualized
 
 
+def _training_plots_with_title(
+    plots: Sequence[tuple],
+    *,
+    title: str | None,
+) -> list[tuple]:
+    """Override resolved training plot titles when an explicit title is given."""
+    if title is None:
+        return list(plots)
+    return [(series_specs, title, ylabel) for series_specs, _title, ylabel in plots]
+
+
 def summarize_dataraw(
     raw_df: pd.DataFrame,
     *,
@@ -618,6 +703,10 @@ def summarize_dataraw(
     """
     rows = []
     ok = raw_df[~raw_df.get("failed", False).astype(bool)].copy() if "failed" in raw_df else raw_df
+    for old_col, new_col in _METRIC_ALIASES.items():
+        if old_col in ok.columns and new_col not in ok.columns:
+            ok = ok.copy()
+            ok[new_col] = ok[old_col]
     active_group_cols = tuple(col for col in group_cols if col in ok.columns)
     active_metric_cols = _summary_metric_cols(metric_cols)
 
@@ -654,9 +743,9 @@ def fit_summary_slopes(
     ycols: Sequence[str] = (
         "C22_inv_C21_op_median",
         "correction_op_median",
-        "leading_mse_exact_median",
+        "leading_mse_median",
         "leading_mse_identity_median",
-        "actual_mse_median",
+        "mse_median",
     ),
     group_cols: Sequence[str] = ("d", "nout", "N", "noise"),
 ) -> pd.DataFrame:
@@ -826,7 +915,7 @@ def _metric_expr(metric: str | MetricExpr) -> MetricExpr | None:
     """Resolve a metric spec to a MetricExpr if it is computed by this module."""
     if isinstance(metric, MetricExpr):
         return metric
-    return DERIVED_TRAINING_METRICS.get(metric)
+    return DERIVED_TRAINING_METRICS.get(_metric_name(metric))
 
 
 def _ensure_metric_column(
@@ -839,6 +928,10 @@ def _ensure_metric_column(
     name = _metric_name(metric)
     if name in raw_df.columns:
         return
+    for old_col, new_col in _METRIC_ALIASES.items():
+        if new_col == name and old_col in raw_df.columns:
+            raw_df[name] = raw_df[old_col]
+            return
 
     expr = _metric_expr(metric)
     if expr is None:
@@ -934,6 +1027,7 @@ def render_training_results(
     show_band: bool = True,
     xlim: tuple[float | None, float | None] | None = None,
     ylim: tuple[float | None, float | None] | None = None,
+    title: str | None = None,
     legend_outside: bool = False,
     ax=None,
 ) -> None:
@@ -952,6 +1046,7 @@ def render_training_results(
             quantile_band=quantile_band,
         ),
     )
+    resolved_plots = _training_plots_with_title(resolved_plots, title=title)
     resolved_plots = _plot_specs_with_metric_names(resolved_plots)
     plot_grouped_mean_median_quantile_summary(
         summary_df,
@@ -989,6 +1084,7 @@ def plot_saved_traindata(
     show_band: bool = True,
     xlim: tuple[float | None, float | None] | None = None,
     ylim: tuple[float | None, float | None] | None = None,
+    title: str | None = None,
     legend_outside=False,
     ax=None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -999,6 +1095,7 @@ def plot_saved_traindata(
         plot_saved_traindata(
             "data/mub_haarstates_N1000_vsntr_extended.zip",
             plots="mse",
+            title="Custom MSE title",
             quantile_band=(0.10, 0.90),
         )
     """
@@ -1031,6 +1128,7 @@ def plot_saved_traindata(
         show_band=show_band,
         xlim=xlim,
         ylim=ylim,
+        title=title,
         legend_outside=legend_outside,
         ax=ax,
     )

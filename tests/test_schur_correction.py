@@ -121,7 +121,7 @@ def test_run_training_experiment_default_haar_test_state_shapes():
     assert set(raw["test_average"]) == {"exact_haar_second_moment"}
     assert set(raw["num_test_points"]) == {0}
     assert len(summary) == 1
-    assert "actual_mse_median" in summary.columns
+    assert "mse_median" in summary.columns
 
 
 def test_run_training_experiment_accepts_explicit_povm_effects():
@@ -183,7 +183,7 @@ def test_run_training_experiment_haar_sample_test_state_shapes():
     assert set(raw["test_average"]) == {"sampled_haar_states"}
     assert set(raw["num_test_points"]) == {3}
     assert len(summary) == 1
-    assert "actual_mse_median" in summary.columns
+    assert "mse_median" in summary.columns
 
 
 def test_run_training_experiment_fixed_test_state_vector_shapes():
@@ -200,7 +200,7 @@ def test_run_training_experiment_fixed_test_state_vector_shapes():
     assert set(raw["test_average"]) == {"fixed_state"}
     assert set(raw["num_test_points"]) == {1}
     assert len(summary) == 1
-    assert "actual_mse_median" in summary.columns
+    assert "mse_median" in summary.columns
 
 
 def test_run_training_experiment_test_state_vector_is_fixed_state():
@@ -446,7 +446,7 @@ def test_run_training_experiment_haar_target_average_shapes():
     assert set(raw["target_average"]) == {"exact_haar_second_moment"}
     assert len(summary) == 1
     assert "target_kind" in summary.columns
-    assert "actual_mse_median" in summary.columns
+    assert "mse_median" in summary.columns
 
 
 def test_run_training_experiment_operator_target_shapes():

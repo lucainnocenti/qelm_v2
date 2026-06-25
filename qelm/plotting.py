@@ -793,6 +793,19 @@ def _default_log_yticks_and_labels(ymin, ymax):
     return yticks, yticklabels
 
 
+def _combine_axis_limits(limits):
+    lows = []
+    highs = []
+    for lo, hi in limits:
+        if np.isfinite(lo) and np.isfinite(hi):
+            lo, hi = sorted((float(lo), float(hi)))
+            lows.append(lo)
+            highs.append(hi)
+    if not lows:
+        return None
+    return min(lows), max(highs)
+
+
 def plot_mse_grid_over_N(
     folder,
     *,
@@ -801,6 +814,10 @@ def plot_mse_grid_over_N(
     n_min=2,
     n_max=13,
     ncols=3,
+    sharex=True,
+    sharey=True,
+    logx=True,
+    logy=True,
     xlim=(15, None),
     ylim=(1e-7, 10),
     plots="mse",
@@ -840,8 +857,19 @@ def plot_mse_grid_over_N(
     ncols : int
         Number of subplot columns.
 
-    xlim, ylim : tuple
-        Axis limits passed to plot_func.
+    sharex, sharey : bool
+        Whether panels use shared x- and y-axes. Set ``sharey=False`` with
+        ``ylim=None`` for per-panel y-axis autoscaling.
+
+    logx, logy : bool
+        Axis scaling passed to plot_func. Use ``logy=False`` for signed metrics
+        such as a full-minus-approximation delta.
+
+    xlim, ylim : tuple or None
+        Axis limits passed to plot_func. Use ``ylim=None`` to autoscale the
+        y-axis from the plotted data; when ``sharey=True`` this autoscale is
+        shared across panels. ``(None, ymax)`` or
+        ``(ymin, None)`` fixes only one side.
 
     filename_template : str
         Template for filenames. Available fields: d, nout, N.
@@ -873,8 +901,8 @@ def plot_mse_grid_over_N(
         nrows=nrows,
         ncols=ncols,
         figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * nrows),
-        sharex=True,
-        sharey=True,
+        sharex=sharex,
+        sharey=sharey,
         gridspec_kw={
             "wspace": 0.0,
             "hspace": 0.0,
@@ -883,8 +911,13 @@ def plot_mse_grid_over_N(
 
     axes = np.asarray(axes).ravel()
 
-    ymin, ymax = ylim
-    yticks, yticklabels = _default_log_yticks_and_labels(ymin, ymax)
+    fixed_yticks = None
+    fixed_yticklabels = None
+    if ylim is not None and None not in ylim:
+        ymin, ymax = ylim
+        fixed_yticks, fixed_yticklabels = _default_log_yticks_and_labels(ymin, ymax)
+
+    plotted_ylims = []
 
     for i, (ax, N, path) in enumerate(zip(axes, Ns, paths)):
         row = i // ncols
@@ -896,9 +929,12 @@ def plot_mse_grid_over_N(
             quantile_band=quantile_band,
             xlim=xlim,
             ylim=ylim,
+            logx=logx,
+            logy=logy,
             show_mean=show_mean,
             ax=ax,
         )
+        plotted_ylims.append(ax.get_ylim())
 
         ax.set_title("")
 
@@ -929,7 +965,7 @@ def plot_mse_grid_over_N(
         )
 
         # Labels only on outer axes
-        if row == nrows - 1:
+        if row == nrows - 1 or not sharex:
             ax.xaxis.label.set_size(axis_labelsize)
         else:
             ax.set_xlabel("")
@@ -939,7 +975,8 @@ def plot_mse_grid_over_N(
             ax.yaxis.label.set_size(axis_labelsize)
         else:
             ax.set_ylabel("")
-            ax.tick_params(labelleft=False)
+            if sharey:
+                ax.tick_params(labelleft=False)
 
         # Keep legend only in the first subplot
         leg = ax.get_legend()
@@ -963,15 +1000,32 @@ def plot_mse_grid_over_N(
                 leg.remove()
 
         # Fixed y-limits and suppressed boundary tick labels
-        ax.set_ylim(ymin, ymax)
-        ax.set_yticks(yticks)
+        if fixed_yticks is not None:
+            ax.set_ylim(ymin, ymax)
+            ax.set_yticks(fixed_yticks)
 
-        if col == 0:
-            ax.set_yticklabels(yticklabels)
+        if (col == 0 or not sharey) and fixed_yticklabels is not None:
+            ax.set_yticklabels(fixed_yticklabels)
 
     # Hide unused axes
     for ax in axes[len(paths):]:
         ax.set_visible(False)
+
+    if sharey and ylim is None:
+        combined_ylim = _combine_axis_limits(plotted_ylims)
+        if combined_ylim is not None:
+            for ax in axes[:len(paths)]:
+                ax.set_ylim(combined_ylim)
+    elif ylim is not None and None in ylim:
+        auto_ylims = [_combine_axis_limits(plotted_ylims)] if sharey else plotted_ylims
+        target_axes = [axes[:len(paths)]] if sharey else [[ax] for ax in axes[:len(paths)]]
+        for panel_axes, auto_ylim in zip(target_axes, auto_ylims):
+            if auto_ylim is None:
+                continue
+            ymin = auto_ylim[0] if ylim[0] is None else ylim[0]
+            ymax = auto_ylim[1] if ylim[1] is None else ylim[1]
+            for ax in panel_axes:
+                ax.set_ylim(ymin, ymax)
 
     if title is None:
         quantile_label = ""
@@ -997,8 +1051,8 @@ def plot_mse_grid_over_N(
             right=0.995,
             bottom=0.055,
             top=0.96,
-            wspace=0.0,
-            hspace=0.0,
+            wspace=0.12 if not sharey else 0.0,
+            hspace=0.12 if not sharex else 0.0,
         )
 
     fig.subplots_adjust(**margins)
@@ -1037,9 +1091,9 @@ def plot_leading_mse_difference_grid_over_N(
     Plot N- or N^2-scaled leading-MSE differences for files indexed by N = 2**n.
 
     The plotted quantity is
-    N**rescale_power * (leading_mse_identity - leading_mse_exact), where
+    N**rescale_power * (leading_mse_identity - leading_mse), where
     ``leading_mse_identity`` is the term computed with
-    ``tilde U U_1^T = I`` and ``leading_mse_exact`` keeps the full correction.
+    ``tilde U U_1^T = I`` and ``leading_mse`` keeps the full correction.
     """
     plot_keys = {
         1: "leading_mse_delta_N",

@@ -1047,6 +1047,10 @@ def _target_descriptor(observable, *, dim: int, nout: int | None) -> dict:
 
 def _saved_dataraw(raw_df: pd.DataFrame, *, sweep_col: str) -> pd.DataFrame:
     """Reduce live raw trial data to compact columns before report serialization."""
+    raw_df = raw_df.copy()
+    if "leading_var" not in raw_df.columns and "leading_var_exact" in raw_df.columns:
+        raw_df["leading_var"] = raw_df["leading_var_exact"]
+
     cols = ["trial"]
     if sweep_col in raw_df.columns:
         cols.append(sweep_col)
@@ -1194,19 +1198,19 @@ def _training_trial_row(
         "C22_lambda_max": diag.C22_lambda_max,
         "C22_cond": diag.C22_cond,
         "C22_kept_rank": diag.C22_kept_rank,
-        "leading_bias_sq_exact": exact["bias_sq"],
-        "leading_var_exact": exact["variance"],
-        "leading_mse_exact": exact["mse"],
-        "leading_bias_sq_identity": identity["bias_sq"],
+        "leading_bias2": exact["bias_sq"],
+        "leading_var": exact["variance"],
+        "leading_mse": exact["mse"],
+        "leading_bias2_identity": identity["bias_sq"],
         "leading_var_identity": identity["variance"],
         "leading_mse_identity": identity["mse"],
-        "bias_sq_identity_over_exact": identity["bias_sq"] / max(exact["bias_sq"], eps),
+        "bias2_identity_over_exact": identity["bias_sq"] / max(exact["bias_sq"], eps),
         "var_identity_over_exact": identity["variance"] / max(exact["variance"], eps),
         "mse_identity_over_exact": identity["mse"] / max(exact["mse"], eps),
-        "actual_over_leading_exact": actual["actual_mse"] / max(exact["mse"], eps),
-        "actual_over_leading_identity": actual["actual_mse"] / max(identity["mse"], eps),
-        "leading_exact_relative_error": abs(exact["mse"] - actual["actual_mse"]) / max(actual["actual_mse"], eps),
-        "leading_identity_relative_error": abs(identity["mse"] - actual["actual_mse"]) / max(actual["actual_mse"], eps),
+        "actual_over_leading_exact": actual["mse"] / max(exact["mse"], eps),
+        "actual_over_leading_identity": actual["mse"] / max(identity["mse"], eps),
+        "leading_exact_relative_error": abs(exact["mse"] - actual["mse"]) / max(actual["mse"], eps),
+        "leading_identity_relative_error": abs(identity["mse"] - actual["mse"]) / max(actual["mse"], eps),
     }
     row.update(actual)
     return row

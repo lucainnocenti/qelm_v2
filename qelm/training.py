@@ -474,7 +474,7 @@ class QELMTrainingResults:
 
     def to_metrics_dict(self) -> dict:
         return {
-            "actual_mse": self.mse,
+            "mse": self.mse,
             "actual_bias_sq": self.bias_sq,
             "actual_variance": self.variance,
             "actual_abs_bias_mean": self.abs_bias_mean,
@@ -652,9 +652,9 @@ class TrainingStudySpec:
     slope_ycols: Sequence[str] = (
         "C22_inv_C21_op_median",
         "correction_op_median",
-        "leading_mse_exact_median",
+        "leading_mse_median",
         "leading_mse_identity_median",
-        "actual_mse_median",
+        "mse_median",
     )
     show_summary: bool = True
     show_slopes: bool = True
@@ -1945,12 +1945,12 @@ def estimate_actual_training_mse(
             deltas,
             optimize=True,
         )
-        actual_mse = float(np.mean(mse_by_training_noise))
+        mse = float(np.mean(mse_by_training_noise))
         actual_bias_sq = float(mean_delta.T @ test_second_moment @ mean_delta)
-        actual_variance = actual_mse - actual_bias_sq
+        actual_variance = mse - actual_bias_sq
 
         return {
-            "actual_mse": actual_mse,
+            "mse": mse,
             "actual_bias_sq": actual_bias_sq,
             "actual_variance": float(actual_variance),
             "actual_abs_bias_mean": np.nan,
@@ -1967,7 +1967,7 @@ def estimate_actual_training_mse(
     var_by_test = np.var(errors, axis=0)
 
     return {
-        "actual_mse": float(np.mean(errors**2)),
+        "mse": float(np.mean(errors**2)),
         "actual_bias_sq": float(np.mean(mean_error_by_test**2)),
         "actual_variance": float(np.mean(var_by_test)),
         "actual_abs_bias_mean": float(np.mean(np.abs(mean_error_by_test))),
@@ -2043,15 +2043,15 @@ def estimate_actual_training_mse_target_average(
         target_second_moment,
         optimize=True,
     )
-    actual_mse = float(np.mean(mse_by_training_noise))
+    mse = float(np.mean(mse_by_training_noise))
     actual_bias_sq = float(
         np.trace(mean_delta.T @ test_second_moment @ mean_delta @ target_second_moment)
     )
 
     return {
-        "actual_mse": actual_mse,
+        "mse": mse,
         "actual_bias_sq": actual_bias_sq,
-        "actual_variance": float(actual_mse - actual_bias_sq),
+        "actual_variance": float(mse - actual_bias_sq),
         "actual_abs_bias_mean": np.nan,
         "actual_noise_trials": int(actual_noise_trials),
     }

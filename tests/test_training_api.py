@@ -25,6 +25,7 @@ from qelm import (
     leading_training_bias_variance_terms,
     load_traindata,
     make_qelm_training_context,
+    plot_mse_grid_over_N,
     plot_leading_mse_difference_grid_over_N,
     plot_saved_traindata,
     resolve_qelm_target,
@@ -655,9 +656,9 @@ def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
     assert list(loaded.data.columns) == [
         "trial",
         "ntr",
-        "leading_bias_sq",
+        "leading_bias2",
         "leading_variance",
-        "identity_leading_bias_sq",
+        "identity_leading_bias2",
         "identity_leading_variance",
         "mse",
         "bias_sq",
@@ -665,7 +666,7 @@ def test_tilde_u_report_saves_extensionless_portable_zip(tmp_path):
     ]
     pd.testing.assert_series_equal(
         loaded.data["mse"],
-        raw["actual_mse"],
+        raw["mse"],
         check_names=False,
     )
     assert "trial_seed" not in loaded.data.columns
@@ -788,8 +789,8 @@ def test_tilde_u_report_saves_portable_parquet_zip(tmp_path):
     assert isinstance(loaded, TrainingReport)
     assert set(loaded.datadict) == {"data", "metadata"}
     np.testing.assert_allclose(
-        loaded.data["leading_bias_sq"] + loaded.data["leading_variance"],
-        raw["leading_mse_exact"],
+        loaded.data["leading_bias2"] + loaded.data["leading_variance"],
+        raw["leading_mse"],
     )
     assert loaded.metadata["sweep_values"] == [12, 16]
 
@@ -819,22 +820,22 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     )
 
     np.testing.assert_allclose(
-        raw["leading_mse_exact"],
-        loaded.data["leading_bias_sq"] + loaded.data["leading_variance"],
+        raw["leading_mse"],
+        loaded.data["leading_bias2"] + loaded.data["leading_variance"],
     )
     np.testing.assert_allclose(
         raw["leading_mse_identity_minus_exact_times_N"],
-        raw["N"] * (raw["leading_mse_identity"] - raw["leading_mse_exact"]),
+        raw["N"] * (raw["leading_mse_identity"] - raw["leading_mse"]),
     )
     np.testing.assert_allclose(
         raw["leading_mse_identity_minus_exact_times_N2"],
-        raw["N"] ** 2 * (raw["leading_mse_identity"] - raw["leading_mse_exact"]),
+        raw["N"] ** 2 * (raw["leading_mse_identity"] - raw["leading_mse"]),
     )
     assert set(summary["ntr"]) == {12, 16}
-    assert "leading_mse_exact_q10" in summary.columns
+    assert "leading_mse_q10" in summary.columns
     assert "leading_mse_identity_minus_exact_times_N_q10" in summary.columns
     assert "leading_mse_identity_minus_exact_times_N2_q10" in summary.columns
-    assert "actual_mse_q90" in summary.columns
+    assert "mse_q90" in summary.columns
     assert set(slopes["x"]) == {"ntr"}
 
     calls = {}
@@ -893,8 +894,8 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
 
     custom_delta = training_reports.MetricExpr(
         "custom_leading_mse_delta",
-        ("leading_mse_identity", "leading_mse_exact"),
-        lambda df: df["leading_mse_identity"] - df["leading_mse_exact"],
+        ("leading_mse_identity", "leading_mse"),
+        lambda df: df["leading_mse_identity"] - df["leading_mse"],
     )
     custom_plot = (
         [(custom_delta, "identity - corrected")],
@@ -908,7 +909,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     )
     np.testing.assert_allclose(
         custom_raw["custom_leading_mse_delta"],
-        custom_raw["leading_mse_identity"] - custom_raw["leading_mse_exact"],
+        custom_raw["leading_mse_identity"] - custom_raw["leading_mse"],
     )
     assert "custom_leading_mse_delta_q10" in custom_summary.columns
     assert calls["plots"][0][0] == [
@@ -931,9 +932,9 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     )
     assert "mse_identity_over_exact" not in plotted_raw.columns
     assert set(plotted_slopes["y"]) <= {
-        "leading_mse_exact_median",
+        "leading_mse_median",
         "leading_mse_identity_median",
-        "actual_mse_median",
+        "mse_median",
     }
 
 
@@ -952,17 +953,17 @@ def test_grouped_tilde_u_plot_uses_latex_axis_labels(monkeypatch, x_col, expecte
     summary = pd.DataFrame(
         {
             x_col: [12, 16],
-            "actual_mse_median": [1.0, 0.8],
-            "actual_mse_mean": [1.1, 0.9],
-            "actual_mse_q10": [0.9, 0.7],
-            "actual_mse_q90": [1.2, 1.0],
+            "mse_median": [1.0, 0.8],
+            "mse_mean": [1.1, 0.9],
+            "mse_q10": [0.9, 0.7],
+            "mse_q90": [1.2, 1.0],
         }
     )
 
     workflows.plot_grouped_mean_median_quantile_summary(
         summary,
         x_col=x_col,
-        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        plots=[([("mse", "MSE")], "title", "ylabel")],
         quantile_band=(0.10, 0.90),
         logx=False,
         logy=False,
@@ -979,17 +980,17 @@ def test_grouped_tilde_u_plot_can_show_mean_without_median(monkeypatch):
     summary = pd.DataFrame(
         {
             "ntr": [12, 16, 100],
-            "actual_mse_median": [1.0, 0.8, 50.0],
-            "actual_mse_mean": [1.1, 0.9, 60.0],
-            "actual_mse_q10": [0.9, 0.7, 40.0],
-            "actual_mse_q90": [1.2, 1.0, 70.0],
+            "mse_median": [1.0, 0.8, 50.0],
+            "mse_mean": [1.1, 0.9, 60.0],
+            "mse_q10": [0.9, 0.7, 40.0],
+            "mse_q90": [1.2, 1.0, 70.0],
         }
     )
 
     workflows.plot_grouped_mean_median_quantile_summary(
         summary,
         x_col="ntr",
-        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        plots=[([("mse", "MSE")], "title", "ylabel")],
         quantile_band=(0.10, 0.90),
         logx=False,
         logy=False,
@@ -1013,10 +1014,10 @@ def test_grouped_tilde_u_plot_draws_into_supplied_axes_without_show(monkeypatch)
     summary = pd.DataFrame(
         {
             "ntr": [12, 16],
-            "actual_mse_median": [1.0, 0.8],
-            "actual_mse_mean": [1.1, 0.9],
-            "actual_mse_q10": [0.9, 0.7],
-            "actual_mse_q90": [1.2, 1.0],
+            "mse_median": [1.0, 0.8],
+            "mse_mean": [1.1, 0.9],
+            "mse_q10": [0.9, 0.7],
+            "mse_q90": [1.2, 1.0],
         }
     )
     fig, axes = plt.subplots(1, 2)
@@ -1025,7 +1026,7 @@ def test_grouped_tilde_u_plot_draws_into_supplied_axes_without_show(monkeypatch)
         workflows.plot_grouped_mean_median_quantile_summary(
             summary,
             x_col="ntr",
-            plots=[([("actual_mse", "MSE")], title, "ylabel")],
+            plots=[([("mse", "MSE")], title, "ylabel")],
             quantile_band=(0.10, 0.90),
             logx=False,
             logy=False,
@@ -1046,17 +1047,17 @@ def test_grouped_tilde_u_plot_explicit_ylim_overrides_visible_x_autoscale(monkey
     summary = pd.DataFrame(
         {
             "ntr": [12, 16, 100],
-            "actual_mse_median": [1.0, 0.8, 50.0],
-            "actual_mse_mean": [1.1, 0.9, 60.0],
-            "actual_mse_q10": [0.9, 0.7, 40.0],
-            "actual_mse_q90": [1.2, 1.0, 70.0],
+            "mse_median": [1.0, 0.8, 50.0],
+            "mse_mean": [1.1, 0.9, 60.0],
+            "mse_q10": [0.9, 0.7, 40.0],
+            "mse_q90": [1.2, 1.0, 70.0],
         }
     )
 
     workflows.plot_grouped_mean_median_quantile_summary(
         summary,
         x_col="ntr",
-        plots=[([("actual_mse", "MSE")], "title", "ylabel")],
+        plots=[([("mse", "MSE")], "title", "ylabel")],
         quantile_band=(0.10, 0.90),
         logx=False,
         logy=False,
@@ -1227,6 +1228,109 @@ def test_training_report_helpers_are_reexported_for_compatibility():
     assert training_reports.load_tilde_u_training_approx_report_data is training_reports.load_traindata
     assert training_reports.plot_saved_training_data is training_reports.plot_saved_traindata
     assert callable(plot_leading_mse_difference_grid_over_N)
+
+
+def test_mse_grid_allows_autoscaled_ylim(tmp_path):
+    import matplotlib.pyplot as plt
+
+    calls = []
+    panel_limits = [(0.2, 3.0), (0.5, 50.0)]
+
+    def fake_plotter(path, **kwargs):
+        calls.append(kwargs["ylim"])
+        ax = kwargs["ax"]
+        ax.plot([1, 2], [1, 2], label="line")
+        ax.set_ylim(panel_limits[len(calls) - 1])
+
+    fig, axes = plot_mse_grid_over_N(
+        tmp_path,
+        n_min=1,
+        n_max=2,
+        ncols=2,
+        ylim=None,
+        plot_func=fake_plotter,
+    )
+
+    assert calls == [None, None]
+    assert axes[0].get_ylim() == (0.2, 50.0)
+    assert axes[1].get_ylim() == (0.2, 50.0)
+    plt.close(fig)
+
+
+def test_mse_grid_allows_per_panel_autoscaled_ylim(tmp_path):
+    import matplotlib.pyplot as plt
+
+    calls = []
+    panel_limits = [(0.2, 3.0), (0.5, 50.0)]
+
+    def fake_plotter(path, **kwargs):
+        calls.append(kwargs["ylim"])
+        ax = kwargs["ax"]
+        ax.plot([1, 2], [1, 2], label="line")
+        ax.set_ylim(panel_limits[len(calls) - 1])
+
+    fig, axes = plot_mse_grid_over_N(
+        tmp_path,
+        n_min=1,
+        n_max=2,
+        ncols=2,
+        sharey=False,
+        ylim=None,
+        plot_func=fake_plotter,
+    )
+
+    assert calls == [None, None]
+    assert axes[0].get_ylim() == panel_limits[0]
+    assert axes[1].get_ylim() == panel_limits[1]
+    plt.close(fig)
+
+
+def test_mse_grid_allows_one_sided_ylim_with_autoscale(tmp_path):
+    import matplotlib.pyplot as plt
+
+    def fake_plotter(path, **kwargs):
+        ax = kwargs["ax"]
+        ax.plot([1, 2], [1, 2], label="line")
+        ax.set_ylim(0.2, 3.0)
+
+    fig, axes = plot_mse_grid_over_N(
+        tmp_path,
+        n_min=1,
+        n_max=1,
+        ncols=1,
+        ylim=(None, 10.0),
+        plot_func=fake_plotter,
+    )
+
+    assert axes[0].get_ylim() == (0.2, 10.0)
+    plt.close(fig)
+
+
+def test_mse_grid_allows_per_panel_one_sided_ylim(tmp_path):
+    import matplotlib.pyplot as plt
+
+    calls = []
+    panel_limits = [(0.2, 3.0), (0.5, 50.0)]
+
+    def fake_plotter(path, **kwargs):
+        calls.append(kwargs["ylim"])
+        ax = kwargs["ax"]
+        ax.plot([1, 2], [1, 2], label="line")
+        ax.set_ylim(panel_limits[len(calls) - 1])
+
+    fig, axes = plot_mse_grid_over_N(
+        tmp_path,
+        n_min=1,
+        n_max=2,
+        ncols=2,
+        sharey=False,
+        ylim=(None, 10.0),
+        plot_func=fake_plotter,
+    )
+
+    assert axes[0].get_ylim() == (0.2, 10.0)
+    assert axes[1].get_ylim() == (0.5, 10.0)
+    plt.close(fig)
 
 
 def test_actual_training_requires_noise_N_when_not_swept():
