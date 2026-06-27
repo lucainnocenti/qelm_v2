@@ -888,45 +888,20 @@ def load_noise_mse_scan_files(
     return pd.concat(frames, ignore_index=True)
 
 
-def plot_noise_mse_scan_files(
+def _noise_mse_scan_summary_data(
     scan_path: str | Path,
     *,
     scale_by_N: bool = False,
-    panel_by: str = "ntr",
     quantiles: Sequence[float] | None = None,
     quantile_band: tuple[float, float] = (0.10, 0.90),
-    show_mean: bool = False,
-    show_median: bool = True,
-    show_band: bool = True,
-    logx: bool = True,
-    logy: bool = True,
-    xlim: tuple[float | None, float | None] | None = None,
-    ylim: tuple[float | None, float | None] | None = None,
-    ncols: int = 2,
-    figsize_per_panel: tuple[float, float] = (5.5, 4.0),
-    legend_outside: bool = False,
-    title: str | None = None,
     skip_unreadable: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame, object, object]:
-    """
-    Plot the three actual-MSE noise-model curves from scan ZIPs.
-
-    ``scan_path`` must be either one scan ZIP or a directory containing scan
-    ZIPs matching ``ntr_*_vsN.zip``.
-
-    ``panel_by="ntr"`` plots MSE vs N in one panel per ntr value.
-    ``panel_by="N"`` plots MSE vs ntr in one panel per N value.
-    """
-    import matplotlib.pyplot as plt
-
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[str], str]:
     raw_df = load_noise_mse_scan_files(
         scan_path,
         skip_unreadable=skip_unreadable,
     )
     if "N" not in raw_df.columns or "ntr" not in raw_df.columns:
         raise ValueError("Scan data must contain N and ntr columns.")
-    if panel_by not in {"ntr", "N"}:
-        raise ValueError("panel_by must be 'ntr' or 'N'.")
 
     metric_cols = [col for col in NOISE_MSE_COLS if col in raw_df.columns]
     if not metric_cols:
@@ -957,6 +932,50 @@ def plot_noise_mse_scan_files(
         quantiles=_summary_quantiles(quantiles, quantile_band),
         metric_cols=metric_cols,
         group_cols=("ntr", "N"),
+    )
+    return raw_df, summary_df, metric_cols, labels, ylabel
+
+
+def plot_noise_mse_scan_files(
+    scan_path: str | Path,
+    *,
+    scale_by_N: bool = False,
+    panel_by: str = "ntr",
+    quantiles: Sequence[float] | None = None,
+    quantile_band: tuple[float, float] = (0.10, 0.90),
+    show_mean: bool = False,
+    show_median: bool = True,
+    show_band: bool = True,
+    logx: bool = True,
+    logy: bool = True,
+    xlim: tuple[float | None, float | None] | None = None,
+    ylim: tuple[float | None, float | None] | None = None,
+    ncols: int = 2,
+    figsize_per_panel: tuple[float, float] = (5.5, 4.0),
+    legend_outside: bool = False,
+    title: str | None = None,
+    skip_unreadable: bool = True,
+) -> None:
+    """
+    Plot the three actual-MSE noise-model curves from scan ZIPs.
+
+    ``scan_path`` must be either one scan ZIP or a directory containing scan
+    ZIPs matching ``ntr_*_vsN.zip``.
+
+    ``panel_by="ntr"`` plots MSE vs N in one panel per ntr value.
+    ``panel_by="N"`` plots MSE vs ntr in one panel per N value.
+    """
+    import matplotlib.pyplot as plt
+
+    if panel_by not in {"ntr", "N"}:
+        raise ValueError("panel_by must be 'ntr' or 'N'.")
+
+    _raw_df, summary_df, metric_cols, labels, ylabel = _noise_mse_scan_summary_data(
+        scan_path,
+        scale_by_N=scale_by_N,
+        quantiles=quantiles,
+        quantile_band=quantile_band,
+        skip_unreadable=skip_unreadable,
     )
 
     x_col = "N" if panel_by == "ntr" else "ntr"
@@ -1010,8 +1029,6 @@ def plot_noise_mse_scan_files(
     fig.tight_layout(rect=[0, 0.03, 1, 0.99])
     # fig.tight_layout()
     plt.show()
-
-    return raw_df, summary_df, fig, axes
 
 
 def _as_traindata(report: str | Path | dict | TrainingReport) -> TrainingReport:

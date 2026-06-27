@@ -1243,6 +1243,55 @@ def test_training_report_helpers_are_reexported():
     assert callable(plot_leading_mse_difference_grid_over_N)
 
 
+def test_noise_mse_scan_plot_is_plot_only(monkeypatch):
+    import matplotlib.pyplot as plt
+
+    raw = pd.DataFrame({"ntr": [12], "N": [20], "mse": [0.1]})
+    summary = pd.DataFrame(
+        {
+            "ntr": [12],
+            "N": [20],
+            "mse_median": [0.1],
+            "mse_q10": [0.08],
+            "mse_q90": [0.12],
+        }
+    )
+    calls = {}
+
+    def fake_summary_data(*args, **kwargs):
+        calls["summary_kwargs"] = kwargs
+        return raw, summary, ["mse"], ["actual MSE"], "MSE"
+
+    def fake_plotter(summary_df, **kwargs):
+        calls["summary"] = summary_df
+        calls["plot_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        training_reports,
+        "_noise_mse_scan_summary_data",
+        fake_summary_data,
+    )
+    monkeypatch.setattr(
+        training_reports,
+        "plot_grouped_mean_median_quantile_summary",
+        fake_plotter,
+    )
+    monkeypatch.setattr(plt, "show", lambda: None)
+
+    assert training_reports.plot_noise_mse_scan_files(
+        "scan-dir",
+        scale_by_N=True,
+        panel_by="ntr",
+        quantile_band=(0.10, 0.90),
+    ) is None
+
+    assert calls["summary_kwargs"]["scale_by_N"] is True
+    pd.testing.assert_frame_equal(calls["summary"].reset_index(drop=True), summary)
+    assert calls["plot_kwargs"]["x_col"] == "N"
+    assert calls["plot_kwargs"]["plots"][0][0] == [("mse", "actual MSE")]
+    plt.close(plt.gcf())
+
+
 def test_mse_grid_allows_autoscaled_ylim(tmp_path):
     import matplotlib.pyplot as plt
 
@@ -1255,15 +1304,17 @@ def test_mse_grid_allows_autoscaled_ylim(tmp_path):
         ax.plot([1, 2], [1, 2], label="line")
         ax.set_ylim(panel_limits[len(calls) - 1])
 
-    fig, axes = plot_mse_grid_over_N(
+    assert plot_mse_grid_over_N(
         tmp_path,
         n_min=1,
         n_max=2,
         ncols=2,
         ylim=None,
         plot_func=fake_plotter,
-    )
+    ) is None
 
+    fig = plt.gcf()
+    axes = np.asarray(fig.axes)
     assert calls == [None, None]
     assert axes[0].get_ylim() == (0.2, 50.0)
     assert axes[1].get_ylim() == (0.2, 50.0)
@@ -1282,7 +1333,7 @@ def test_mse_grid_allows_per_panel_autoscaled_ylim(tmp_path):
         ax.plot([1, 2], [1, 2], label="line")
         ax.set_ylim(panel_limits[len(calls) - 1])
 
-    fig, axes = plot_mse_grid_over_N(
+    assert plot_mse_grid_over_N(
         tmp_path,
         n_min=1,
         n_max=2,
@@ -1290,8 +1341,10 @@ def test_mse_grid_allows_per_panel_autoscaled_ylim(tmp_path):
         sharey=False,
         ylim=None,
         plot_func=fake_plotter,
-    )
+    ) is None
 
+    fig = plt.gcf()
+    axes = np.asarray(fig.axes)
     assert calls == [None, None]
     assert axes[0].get_ylim() == panel_limits[0]
     assert axes[1].get_ylim() == panel_limits[1]
@@ -1306,15 +1359,17 @@ def test_mse_grid_allows_one_sided_ylim_with_autoscale(tmp_path):
         ax.plot([1, 2], [1, 2], label="line")
         ax.set_ylim(0.2, 3.0)
 
-    fig, axes = plot_mse_grid_over_N(
+    assert plot_mse_grid_over_N(
         tmp_path,
         n_min=1,
         n_max=1,
         ncols=1,
         ylim=(None, 10.0),
         plot_func=fake_plotter,
-    )
+    ) is None
 
+    fig = plt.gcf()
+    axes = np.asarray(fig.axes)
     assert axes[0].get_ylim() == (0.2, 10.0)
     plt.close(fig)
 
@@ -1331,7 +1386,7 @@ def test_mse_grid_allows_per_panel_one_sided_ylim(tmp_path):
         ax.plot([1, 2], [1, 2], label="line")
         ax.set_ylim(panel_limits[len(calls) - 1])
 
-    fig, axes = plot_mse_grid_over_N(
+    assert plot_mse_grid_over_N(
         tmp_path,
         n_min=1,
         n_max=2,
@@ -1339,8 +1394,10 @@ def test_mse_grid_allows_per_panel_one_sided_ylim(tmp_path):
         sharey=False,
         ylim=(None, 10.0),
         plot_func=fake_plotter,
-    )
+    ) is None
 
+    fig = plt.gcf()
+    axes = np.asarray(fig.axes)
     assert axes[0].get_ylim() == (0.2, 10.0)
     assert axes[1].get_ylim() == (0.5, 10.0)
     plt.close(fig)

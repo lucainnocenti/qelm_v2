@@ -330,7 +330,7 @@ def plot_grouped_mean_median_quantile_summary(
     ylim=None,
     legend_outside=False,
     ax=None,
-):
+) -> None:
     """
     Plot several summarized quantities on the same axes.
 
@@ -560,50 +560,6 @@ def plot_metric_vs_kappa(
     ax.legend()
     plt.show()
 
-def plot_failure_rates(
-    df: pd.DataFrame,
-    thresholds: Dict[str, float],
-    group_cols: Tuple[str, ...] = ("r", "q", "p"),
-) -> pd.DataFrame:
-    """
-    Compute and plot empirical failure rates for chosen thresholds.
-
-    thresholds example:
-        {"D_Y": 0.1, "D_Q": 0.1, "D_R_schur": 0.1}
-    """
-    rows = []
-
-    for key, g in df.groupby(list(group_cols)):
-        row = dict(zip(group_cols, key))
-        row["num_trials"] = len(g)
-
-        for metric, threshold in thresholds.items():
-            row[f"{metric}_fail_rate"] = float(np.mean(g[metric] > threshold))
-            row[f"{metric}_threshold"] = threshold
-
-        rows.append(row)
-
-    fail_df = pd.DataFrame(rows)
-
-    for metric in thresholds:
-        col = f"{metric}_fail_rate"
-
-        fig, ax = plt.subplots(figsize=(7, 4.5))
-        for q, g in fail_df.groupby("q"):
-            if "kappa_q3" in df.columns:
-                pass
-            g = g.sort_values("p")
-            ax.plot(g["p"], g[col], marker="o", label=f"q={q}")
-
-        ax.set_xscale("log")
-        ax.set_xlabel("p")
-        ax.set_ylabel("empirical failure rate")
-        ax.set_title(f"Failure rate for {metric}")
-        ax.grid(True, which="both", alpha=0.3)
-        ax.legend()
-        plt.show()
-
-    return fail_df
 
 def plot_sweep_diagnostics(
     summary: pd.DataFrame,
@@ -836,7 +792,7 @@ def plot_mse_grid_over_N(
     legend_loc="lower left",
     title_y=0.995,
     margins=None,
-):
+) -> None:
     """
     Plot saved training curves for files indexed by N = 2**n.
 
@@ -877,10 +833,7 @@ def plot_mse_grid_over_N(
     plot_func : callable or None
         Plotting function. If None, uses the global plot_saved_traindata.
 
-    Returns
-    -------
-    fig, axes
-        Matplotlib figure and flattened axes array.
+    This function is plot-only and returns None.
     """
     if plot_func is None:
         from .training_reports import plot_saved_traindata
@@ -1057,8 +1010,6 @@ def plot_mse_grid_over_N(
 
     fig.subplots_adjust(**margins)
 
-    return fig, axes
-
 
 def plot_leading_mse_difference_grid_over_N(
     folder,
@@ -1086,7 +1037,7 @@ def plot_leading_mse_difference_grid_over_N(
     legend_loc="lower left",
     title_y=0.995,
     margins=None,
-):
+) -> None:
     """
     Plot N- or N^2-scaled leading-MSE differences for files indexed by N = 2**n.
 
@@ -1116,7 +1067,7 @@ def plot_leading_mse_difference_grid_over_N(
             rf"${n_realizations}$ realizations{quantile_label}"
         )
 
-    return plot_mse_grid_over_N(
+    plot_mse_grid_over_N(
         folder,
         d=d,
         nout=nout,
