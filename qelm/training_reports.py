@@ -7,7 +7,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 from typing import Callable, Sequence, Tuple
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 import pandas as pd
@@ -16,17 +16,15 @@ from .linalg import distribution_summary, loglog_fit, quantile_suffix
 from .plotting import plot_grouped_mean_median_quantile_summary
 from .quantum import qubit_mub_povm
 
-try:
-    from IPython.display import display
-except ImportError:  # pragma: no cover - plain Python fallback
-    def display(obj):
-        """Print objects when IPython display is unavailable."""
-        print(obj)
-
 
 @dataclass(frozen=True)
 class MetricExpr:
-    """A lazily materialized training metric column."""
+    """A derived metric that can be requested by summaries or plot specs.
+
+    ``deps`` names the raw or derived columns required by ``compute``. Use this
+    for ad hoc quantities without permanently adding them to the built-in metric
+    registry.
+    """
 
     name: str
     deps: tuple[str, ...]
@@ -200,6 +198,17 @@ TRAINING_PLOT_SPECS = {
 # (series_specs, title, ylabel) tuples instead of named plot keys.
 TRAINING_PLOTS = list(TRAINING_PLOT_SPECS.values())
 
+NOISE_MSE_COLS = (
+    "mse_multinomial",
+    "mse_gaussian",
+    "mse_centered_gaussian",
+)
+NOISE_MSE_LABELS = {
+    "mse_multinomial": "multinomial",
+    "mse_gaussian": "gaussian",
+    "mse_centered_gaussian": "centered gaussian",
+}
+
 # Internal-to-saved metric-name mapping for report serialization. Keys are the
 # canonical names used everywhere in this module; values are the shorter column
 # names found in saved JSON/ZIP reports. TrainingReport.expanded_df() applies the
@@ -214,14 +223,6 @@ TRAINING_SAVED_METRIC_COLS = {
     "actual_bias_sq": "bias_sq",
     "actual_variance": "variance",
 }
-
-# Historical aliases for the earlier tilde-U approximation API. They point to the
-# same list/dict objects rather than copies, so adding a training metric or plot
-# keeps old notebooks and scripts in sync with the generalized training helpers.
-TILDE_U_TRAINING_APPROX_METRIC_COLS = TRAINING_METRIC_COLS
-TILDE_U_TRAINING_APPROX_PLOT_SPECS = TRAINING_PLOT_SPECS
-TILDE_U_TRAINING_APPROX_PLOTS = TRAINING_PLOTS
-TILDE_U_TRAINING_APPROX_SAVED_METRIC_COLS = TRAINING_SAVED_METRIC_COLS
 
 # Private aliases for loader internals. _SAVED_METRIC_COLS names the map used by
 # the report loader, while _COMPACT_TO_INTERNAL_METRIC_COLS reverses it from
@@ -399,7 +400,12 @@ class TrainingReport:
         *,
         metric_cols: Sequence[str | MetricExpr] | None = None,
     ) -> pd.DataFrame:
-        """Return raw data expanded with metadata constants and derived metrics."""
+        """Return raw rows with metadata constants and requested derived metrics.
+
+        Saved reports keep repeated dimensions such as ``N`` or ``ntr`` in
+        metadata when possible. This method restores those columns so the rows
+        can be summarized or inspected as a normal DataFrame.
+        """
         raw_df = _drop_legacy_report_dimension_cols(self.data).copy()
 
         for compact_col, internal_col in _COMPACT_TO_INTERNAL_METRIC_COLS.items():
@@ -439,7 +445,7 @@ class TrainingReport:
         x_col: str | None = None,
         metric_cols: Sequence[str | MetricExpr] | None = None,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Build plotting-ready raw, summary, and slope tables."""
+        """Return expanded raw rows, grouped summaries, and fitted slopes."""
         return summarize_traindata(
             self,
             quantiles=quantiles,
@@ -451,9 +457,9 @@ class TrainingReport:
     def plot(
         self,
         **kwargs,
-    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """Render plots from this report and return raw, summary, and slopes."""
-        return plot_saved_traindata(self, **kwargs)
+    ) -> None:
+        """Plot this report. Use ``summarize()`` when data tables are needed."""
+        plot_saved_traindata(self, **kwargs)
 
 
 def _drop_legacy_report_dimension_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -698,9 +704,7 @@ def summarize_dataraw(
         "target_normalization",
     ),
 ) -> pd.DataFrame:
-    """
-    Summarize training-result trials with configurable quantiles.
-    """
+    """Summarize already-expanded training trial rows by report dimensions."""
     rows = []
     ok = raw_df[~raw_df.get("failed", False).astype(bool)].copy() if "failed" in raw_df else raw_df
     for old_col, new_col in _METRIC_ALIASES.items():
@@ -818,10 +822,12 @@ def _normalize_metadata(metadata: dict) -> dict:
 
 def load_traindata(path: str | Path) -> TrainingReport:
     """
-    Load a portable training report as a TrainingReport.
+    Load a portable training report without expanding or summarizing it.
 
     Portable .zip reports store tables as Parquet and metadata as plain JSON,
-    so they are intended for moving between machines and pandas versions.
+    so they are intended for moving between machines and pandas versions. Call
+    ``TrainingReport.expanded_df()`` or ``summarize_traindata()`` when you need
+    analysis-ready DataFrames.
     """
     report_path = Path(path).expanduser()
     if report_path.suffix.lower() == ".zip":
@@ -833,8 +839,179 @@ def load_traindata(path: str | Path) -> TrainingReport:
                 metadata=_normalize_metadata(
                     json.loads(archive.read(manifest["metadata"]).decode("utf-8"))
                 ),
-            )
+        )
     raise ValueError("training report path must end in .zip.")
+
+
+def _scan_file_ntr(path: Path) -> int:
+    parts = path.stem.split("_")
+    for part in parts:
+        try:
+            return int(part)
+        except ValueError:
+            continue
+    return 0
+
+
+def load_noise_mse_scan_files(
+    scan_path: str | Path,
+    *,
+    pattern: str = "ntr_*_vsN.zip",
+    skip_unreadable: bool = True,
+) -> pd.DataFrame:
+    """Load noise-model MSE scan ZIPs into one raw DataFrame."""
+    scan_path = Path(scan_path).expanduser()
+    if scan_path.is_file():
+        paths = [scan_path]
+    else:
+        paths = sorted(scan_path.glob(pattern), key=_scan_file_ntr)
+
+    if not paths:
+        raise FileNotFoundError(
+            f"No scan ZIPs matching {pattern!r} found directly in {scan_path}."
+        )
+
+    frames = []
+    for path in paths:
+        try:
+            frame = load_traindata(path).data.copy()
+        except (BadZipFile, EOFError, OSError, ValueError):
+            if skip_unreadable:
+                continue
+            raise
+        frame["scan_file"] = str(path)
+        frames.append(frame)
+
+    if not frames:
+        raise FileNotFoundError(f"No readable scan ZIPs found in {scan_path}.")
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def plot_noise_mse_scan_files(
+    scan_path: str | Path,
+    *,
+    scale_by_N: bool = False,
+    panel_by: str = "ntr",
+    quantiles: Sequence[float] | None = None,
+    quantile_band: tuple[float, float] = (0.10, 0.90),
+    show_mean: bool = False,
+    show_median: bool = True,
+    show_band: bool = True,
+    logx: bool = True,
+    logy: bool = True,
+    xlim: tuple[float | None, float | None] | None = None,
+    ylim: tuple[float | None, float | None] | None = None,
+    ncols: int = 2,
+    figsize_per_panel: tuple[float, float] = (5.5, 4.0),
+    legend_outside: bool = False,
+    title: str | None = None,
+    skip_unreadable: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, object, object]:
+    """
+    Plot the three actual-MSE noise-model curves from scan ZIPs.
+
+    ``scan_path`` must be either one scan ZIP or a directory containing scan
+    ZIPs matching ``ntr_*_vsN.zip``.
+
+    ``panel_by="ntr"`` plots MSE vs N in one panel per ntr value.
+    ``panel_by="N"`` plots MSE vs ntr in one panel per N value.
+    """
+    import matplotlib.pyplot as plt
+
+    raw_df = load_noise_mse_scan_files(
+        scan_path,
+        skip_unreadable=skip_unreadable,
+    )
+    if "N" not in raw_df.columns or "ntr" not in raw_df.columns:
+        raise ValueError("Scan data must contain N and ntr columns.")
+    if panel_by not in {"ntr", "N"}:
+        raise ValueError("panel_by must be 'ntr' or 'N'.")
+
+    metric_cols = [col for col in NOISE_MSE_COLS if col in raw_df.columns]
+    if not metric_cols:
+        raise ValueError(f"Scan data has none of the expected columns: {NOISE_MSE_COLS}.")
+
+    plot_df = raw_df.copy()
+    if scale_by_N:
+        scaled_cols = []
+        for col in metric_cols:
+            scaled_col = f"{col}_times_N"
+            plot_df[scaled_col] = (
+                plot_df[col].to_numpy(dtype=float)
+                * plot_df["N"].to_numpy(dtype=float)
+            )
+            scaled_cols.append(scaled_col)
+        labels = [
+            NOISE_MSE_LABELS[col.removesuffix("_times_N")]
+            for col in scaled_cols
+        ]
+        metric_cols = scaled_cols
+        ylabel = r"$N\,\mathrm{MSE}$"
+    else:
+        labels = [NOISE_MSE_LABELS[col] for col in metric_cols]
+        ylabel = "MSE"
+
+    summary_df = summarize_dataraw(
+        plot_df,
+        quantiles=_summary_quantiles(quantiles, quantile_band),
+        metric_cols=metric_cols,
+        group_cols=("ntr", "N"),
+    )
+
+    x_col = "N" if panel_by == "ntr" else "ntr"
+    panel_values = sorted(int(value) for value in summary_df[panel_by].dropna().unique())
+    if not panel_values:
+        raise ValueError(f"No {panel_by} values found in scan data.")
+
+    ncols = max(1, int(ncols))
+    nrows = int(np.ceil(len(panel_values) / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(figsize_per_panel[0] * ncols, figsize_per_panel[1] * nrows),
+        squeeze=False,
+    )
+
+    plot_specs = [
+        (
+            list(zip(metric_cols, labels)),
+            "Actual MSE by noise model",
+            ylabel,
+        )
+    ]
+    for ax, panel_value in zip(axes.ravel(), panel_values):
+        panel = summary_df[summary_df[panel_by] == panel_value].sort_values(x_col)
+        plot_grouped_mean_median_quantile_summary(
+            panel,
+            x_col=x_col,
+            plots=plot_specs,
+            quantile_band=quantile_band,
+            logx=logx,
+            logy=logy,
+            show_mean=show_mean,
+            show_median=show_median,
+            show_band=show_band,
+            xlim=xlim,
+            ylim=ylim,
+            legend_outside=legend_outside,
+            ax=ax,
+        )
+        ax.set_title(f"{panel_by}={panel_value}")
+
+    for ax in axes.ravel()[len(panel_values):]:
+        ax.set_visible(False)
+
+    if title is None:
+        title = f"Scan actual MSEs vs {x_col}"
+        if scale_by_N:
+            title += r" ($N\cdot\,\mathrm{MSE}$)"
+    fig.suptitle(title)
+    fig.tight_layout(rect=[0, 0.03, 1, 0.99])
+    # fig.tight_layout()
+    plt.show()
+
+    return raw_df, summary_df, fig, axes
 
 
 def _as_traindata(report: str | Path | dict | TrainingReport) -> TrainingReport:
@@ -957,16 +1134,7 @@ def _add_derived_saved_report_metrics(
     *,
     metric_cols: Sequence[str | MetricExpr] | None = None,
 ) -> None:
-    """Add requested derived metric columns to saved raw data.
-    
-    Parameters
-    ----------
-    raw_df : pd.DataFrame
-        The raw training data DataFrame to which derived metrics will be added.
-    metric_cols : Sequence[str | MetricExpr] | None, optional
-        A sequence of metric names or MetricExpr objects specifying which derived metrics to add.
-        If None, all built-in derived metrics are added. Otherwise, only the requested metrics are
-    """
+    """Add requested derived metric columns to saved raw data."""
     requested = (
         tuple(DERIVED_TRAINING_METRICS)
         if metric_cols is None
@@ -985,12 +1153,11 @@ def summarize_traindata(
     metric_cols: Sequence[str | MetricExpr] | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Build plotting-ready raw, summary, and slope tables from a saved report.
+    Return expanded raw rows, grouped summaries, and fitted slopes.
 
-    `report` can be a .zip path or the dictionary returned by
-    `load_traindata`. Compact saved reports store
-    user-facing metric names; this helper restores the internal metric columns
-    expected by the notebook plotting functions and derives MSE ratios/errors.
+    Use this for analysis, table inspection, custom plotting, or tests that
+    need the data products. ``plot_saved_traindata()`` is the convenience
+    wrapper for plotting only.
     """
     traindata = _as_traindata(report)
     expanded_df = traindata.expanded_df(metric_cols=metric_cols)
@@ -1008,17 +1175,13 @@ def summarize_traindata(
     return expanded_df, summary_df, slopes_df
 
 
-def render_training_results(
+def plot_training_summary(
     summary_df: pd.DataFrame,
-    slopes_df: pd.DataFrame,
     *,
     metadata: dict,
     x_col: str,
     plots: Sequence[str] | str | None,
     quantile_band: tuple[float, float],
-    show_summary: bool = False,
-    show_slopes: bool = False,
-    make_plots: bool = True,
     logx: bool = True,
     logy: bool = True,
     figsize: tuple[float, float] = (5.5, 4.0),
@@ -1031,14 +1194,7 @@ def render_training_results(
     legend_outside: bool = False,
     ax=None,
 ) -> None:
-    """Display optional tables and render the configured training summary plots."""
-    if show_summary:
-        display(summary_df)
-    if show_slopes:
-        display(slopes_df)
-    if not make_plots:
-        return
-
+    """Plot selected metrics from an existing training summary table."""
     resolved_plots = _contextualized_training_plots(
         _training_plots_from_keys(plots),
         title_suffix=_training_context_title_suffix(
@@ -1070,12 +1226,8 @@ def plot_saved_traindata(
     report: str | Path | dict | TrainingReport,
     *,
     plots: Sequence[str] | str | None = "mse",
-    quantiles: Sequence[float] | None = None,
     quantile_band: tuple[float, float] = (0.25, 0.75),
     x_col: str | None = None,
-    show_summary: bool = False,
-    show_slopes: bool = False,
-    make_plots: bool = True,
     logx: bool = True,
     logy: bool = True,
     figsize: tuple[float, float] = (5.5, 4.0),
@@ -1087,9 +1239,12 @@ def plot_saved_traindata(
     title: str | None = None,
     legend_outside=False,
     ax=None,
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> None:
     """
-    Load or reuse saved training data and plot it like live results.
+    Load a saved training report and plot the selected summary curves.
+
+    This function is intentionally plot-only. Use ``summarize_traindata()`` if
+    you need raw rows, summary statistics, or fitted slopes.
 
     Example:
         plot_saved_traindata(
@@ -1101,25 +1256,21 @@ def plot_saved_traindata(
     """
     traindata = _as_traindata(report)
     resolved_plots = _training_plots_from_keys(plots)
-    raw_df, summary_df, slopes_df = summarize_traindata(
-        traindata,
-        quantiles=quantiles,
-        quantile_band=quantile_band,
-        x_col=x_col,
-        metric_cols=_metric_specs_from_plot_specs(resolved_plots),
+    metric_specs = _metric_specs_from_plot_specs(resolved_plots)
+    expanded_df = traindata.expanded_df(metric_cols=metric_specs)
+    summary_df = summarize_dataraw(
+        expanded_df,
+        quantiles=_summary_quantiles(None, quantile_band),
+        metric_cols=metric_specs,
     )
     resolved_x_col = _xcol_from_metadata(metadata=traindata.metadata, x_col=x_col)
 
-    render_training_results(
+    plot_training_summary(
         summary_df,
-        slopes_df,
         metadata=traindata.metadata,
         x_col=resolved_x_col,
         plots=plots,
         quantile_band=quantile_band,
-        show_summary=show_summary,
-        show_slopes=show_slopes,
-        make_plots=make_plots,
         logx=logx,
         logy=logy,
         figsize=figsize,
@@ -1132,13 +1283,3 @@ def plot_saved_traindata(
         legend_outside=legend_outside,
         ax=ax,
     )
-
-    return raw_df, summary_df, slopes_df
-
-
-summarize_tilde_u_training_approx = summarize_dataraw
-fit_tilde_u_training_approx_slopes = fit_summary_slopes
-load_tilde_u_training_approx_report_data = load_traindata
-summarize_saved_training_data = summarize_traindata
-render_tilde_u_training_approx_report = render_training_results
-plot_saved_training_data = plot_saved_traindata

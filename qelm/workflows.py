@@ -92,8 +92,8 @@ from .training_reports import (
     _contextualized_training_plots,
     fit_summary_slopes,
     load_traindata,
+    plot_training_summary,
     plot_saved_traindata,
-    render_training_results,
     summarize_traindata,
     summarize_dataraw,
 )
@@ -1334,17 +1334,20 @@ def run_training_and_report_results(
         if study.verbose and not quiet:
             print(f"Saved training data to {saved_path}")
 
-    render_training_results(
-        summary_df,
-        slopes_df,
-        metadata=metadata,
-        x_col=resolved_x_col,
-        plots=study.plots,
-        quantile_band=study.quantile_band,
-        show_summary=study.show_summary,
-        show_slopes=study.show_slopes,
-        make_plots=study.make_plots,
-    )
+    if study.show_summary:
+        display(summary_df)
+
+    if study.show_slopes:
+        display(slopes_df)
+
+    if study.make_plots:
+        plot_training_summary(
+            summary_df,
+            metadata=metadata,
+            x_col=resolved_x_col,
+            plots=study.plots,
+            quantile_band=study.quantile_band,
+        )
 
     return raw_df, summary_df, slopes_df
 

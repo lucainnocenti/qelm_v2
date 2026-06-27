@@ -851,7 +851,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     )
 
     ax_sentinel = object()
-    plotted_raw, plotted_summary, plotted_slopes = plot_saved_traindata(
+    assert plot_saved_traindata(
         output_file,
         plots="mse",
         quantile_band=(0.10, 0.90),
@@ -860,7 +860,7 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         xlim=(10, 20),
         ylim=(0.1, 2.0),
         ax=ax_sentinel,
-    )
+    ) is None
 
     assert calls["x_col"] == "ntr"
     expected_mse_plot = workflows.TRAINING_PLOT_SPECS["mse"]
@@ -882,15 +882,19 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         assert text in mse_title
     mse_calls = calls.copy()
 
-    delta_raw, delta_summary, _delta_slopes = plot_saved_traindata(
-        output_file,
-        plots="leading_mse_delta_N2",
+    delta_raw, delta_summary, _delta_slopes = summarize_traindata(
+        loaded,
         quantile_band=(0.10, 0.90),
-        make_plots=False,
+        metric_cols=("leading_mse_identity_minus_exact_times_N2",),
     )
     assert "leading_mse_identity_minus_exact_times_N2" in delta_raw.columns
     assert "leading_mse_identity_minus_exact_times_N" not in delta_raw.columns
     assert "leading_mse_identity_minus_exact_times_N2_q10" in delta_summary.columns
+    assert plot_saved_traindata(
+        output_file,
+        plots="leading_mse_delta_N2",
+        quantile_band=(0.10, 0.90),
+    ) is None
 
     custom_delta = training_reports.MetricExpr(
         "custom_leading_mse_delta",
@@ -902,16 +906,21 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
         "Custom leading-MSE delta",
         "delta",
     )
-    custom_raw, custom_summary, _custom_slopes = plot_saved_traindata(
-        output_file,
-        plots=custom_plot,
+    custom_raw, custom_summary, _custom_slopes = summarize_traindata(
+        loaded,
         quantile_band=(0.10, 0.90),
+        metric_cols=(custom_delta,),
     )
     np.testing.assert_allclose(
         custom_raw["custom_leading_mse_delta"],
         custom_raw["leading_mse_identity"] - custom_raw["leading_mse"],
     )
     assert "custom_leading_mse_delta_q10" in custom_summary.columns
+    assert plot_saved_traindata(
+        output_file,
+        plots=custom_plot,
+        quantile_band=(0.10, 0.90),
+    ) is None
     assert calls["plots"][0][0] == [
         ("custom_leading_mse_delta", "identity - corrected")
     ]
@@ -923,15 +932,20 @@ def test_saved_tilde_u_report_data_can_be_summarized_and_plotted(tmp_path, monke
     assert mse_calls["xlim"] == (10, 20)
     assert mse_calls["ylim"] == (0.1, 2.0)
     assert mse_calls["ax"] is ax_sentinel
-    shared_raw_cols = list(plotted_raw.columns.intersection(raw.columns))
-    shared_summary_cols = list(plotted_summary.columns.intersection(summary.columns))
-    pd.testing.assert_frame_equal(plotted_raw[shared_raw_cols], raw[shared_raw_cols])
+    mse_raw, mse_summary, mse_slopes = summarize_traindata(
+        loaded,
+        quantile_band=(0.10, 0.90),
+        metric_cols=training_reports._metric_specs_from_plot_specs([expected_mse_plot]),
+    )
+    shared_raw_cols = list(mse_raw.columns.intersection(raw.columns))
+    shared_summary_cols = list(mse_summary.columns.intersection(summary.columns))
+    pd.testing.assert_frame_equal(mse_raw[shared_raw_cols], raw[shared_raw_cols])
     pd.testing.assert_frame_equal(
-        plotted_summary[shared_summary_cols],
+        mse_summary[shared_summary_cols],
         summary[shared_summary_cols],
     )
-    assert "mse_identity_over_exact" not in plotted_raw.columns
-    assert set(plotted_slopes["y"]) <= {
+    assert "mse_identity_over_exact" not in mse_raw.columns
+    assert set(mse_slopes["y"]) <= {
         "leading_mse_median",
         "leading_mse_identity_median",
         "mse_median",
@@ -1208,8 +1222,9 @@ def test_tilde_u_plot_selector_uses_short_keys():
         workflows._training_plots_from_keys("not_a_plot")
 
 
-def test_training_report_helpers_are_reexported_for_compatibility():
+def test_training_report_helpers_are_reexported():
     assert workflows.plot_saved_traindata is training_reports.plot_saved_traindata
+    assert workflows.plot_training_summary is training_reports.plot_training_summary
     assert workflows.summarize_traindata is training_reports.summarize_traindata
     assert (
         workflows.load_traindata
@@ -1225,8 +1240,6 @@ def test_training_report_helpers_are_reexported_for_compatibility():
     )
     assert workflows.run_tilde_u_training_approx_experiment is workflows.run_training_experiment
     assert workflows.run_tilde_u_training_approx_report is workflows.run_training_and_report_results
-    assert training_reports.load_tilde_u_training_approx_report_data is training_reports.load_traindata
-    assert training_reports.plot_saved_training_data is training_reports.plot_saved_traindata
     assert callable(plot_leading_mse_difference_grid_over_N)
 
 

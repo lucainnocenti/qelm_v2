@@ -68,6 +68,36 @@ def _sample_multinomial_probability_matrix(
 
     return P_hat
 
+def _sample_poisson_probability_matrix(
+    P: np.ndarray,
+    *,
+    N: int,
+    rng: np.random.Generator,
+    normalize: bool = True,
+) -> np.ndarray:
+    counts = rng.poisson(N * P)
+
+    if not normalize:
+        # Independent Poisson estimate.
+        # Columns are not guaranteed to sum to 1.
+        return counts / N
+
+    totals = counts.sum(axis=0, keepdims=True)
+
+    # Extremely unlikely when N is large and columns sum to 1,
+    # since P(total = 0) = exp(-N).
+    P_hat = np.empty_like(P, dtype=float)
+
+    nonzero = totals > 0
+    np.divide(counts, totals, out=P_hat, where=nonzero)
+
+    # Fallback for rare zero-total columns.
+    zero_cols = ~nonzero.ravel()
+    if np.any(zero_cols):
+        P_hat[:, zero_cols] = P[:, zero_cols]
+
+    return P_hat
+
 
 def sample_finite_shot_probability_matrix(
     P: np.ndarray,
@@ -180,6 +210,16 @@ def sample_shot_noise(
 
     if noise == "multinomial":
         P_hat = _sample_multinomial_probability_matrix(P, N=Nshots, rng=rng)
+        if output == "probability":
+            return P_hat
+        return np.sqrt(Nshots) * (P_hat - P)
+    if noise == "poisson":
+        P_hat = _sample_poisson_probability_matrix(
+            P,
+            N=Nshots,
+            rng=rng,
+            normalize=True,
+        )
         if output == "probability":
             return P_hat
         return np.sqrt(Nshots) * (P_hat - P)
